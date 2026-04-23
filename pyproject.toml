@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-swift-metal"
+version = "0.1.0"
+description = "vLLM Metal plugin powered by mlx-swift — high-performance LLM inference on Apple Silicon"
+requires-python = ">=3.10"
+dependencies = [
+    "vllm>=0.19.0",
+]
+
+[project.entry-points."vllm.platform_plugins"]
+swift_metal = "vllm_swift_metal:register"
+
+[tool.setuptools.packages.find]
+include = ["vllm_swift_metal*"]
