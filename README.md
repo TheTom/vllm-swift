@@ -273,6 +273,9 @@ vllm-swift download mlx-community/Qwen3-4B-4bit
 
 # Or manually:
 huggingface-cli download mlx-community/Qwen3-4B-4bit --local-dir ~/models/Qwen3-4B-4bit
+
+# Already have models in HuggingFace cache? Point directly at them:
+vllm-swift serve ~/.cache/huggingface/hub/models--mlx-community--Qwen3-4B-4bit/snapshots/latest
 ```
 
 ## Project Structure
