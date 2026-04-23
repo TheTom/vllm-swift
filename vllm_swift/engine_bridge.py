@@ -154,6 +154,7 @@ def _get_lib():
         ctypes.c_int32,
         ctypes.POINTER(ctypes.c_int32),
         ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),  # grid_thw [T, H, W]
         ctypes.c_float,
         ctypes.c_float,
     ]
@@ -258,6 +259,7 @@ class SwiftInferenceEngine:
         prompt_tokens: list[int],
         pixels: list[float] | None = None,
         pixel_shape: list[int] | None = None,
+        grid_thw: list[int] | None = None,
         temperature: float = 0.0,
         top_p: float = 1.0,
     ) -> int:
@@ -266,6 +268,7 @@ class SwiftInferenceEngine:
         if pixels and pixel_shape:
             pix_arr = (ctypes.c_float * len(pixels))(*pixels)
             dims_arr = (ctypes.c_int32 * len(pixel_shape))(*pixel_shape)
+            thw_arr = (ctypes.c_int32 * 3)(*grid_thw[:3]) if grid_thw else None
             return self._lib.vsm_engine_prefill_vlm(
                 self._handle,
                 req_id.encode(),
@@ -275,6 +278,7 @@ class SwiftInferenceEngine:
                 len(pixels),
                 dims_arr,
                 len(pixel_shape),
+                thw_arr,
                 temperature,
                 top_p,
             )

@@ -507,6 +507,7 @@ public func vsm_engine_prefill_vlm(
     pixelCount: Int32,
     pixelDims: UnsafePointer<Int32>?,
     numPixelDims: Int32,
+    gridTHW: UnsafePointer<Int32>?,
     temperature: Float,
     topP: Float
 ) -> Int32 {
@@ -531,22 +532,21 @@ public func vsm_engine_prefill_vlm(
 
             let pixelArray = MLXArray(pixelData).reshaped(shape)
 
-            // Extract H, W from shape for THW frames
-            // Shape is typically [N, C, H, W] or [C, H, W]
-            let h: Int
-            let w: Int
-            if shape.count >= 4 {
-                h = shape[shape.count - 2]
-                w = shape[shape.count - 1]
-            } else if shape.count == 3 {
-                h = shape[1]
-                w = shape[2]
+            // Use grid_thw for frames if provided, else infer from shape
+            let frames: [THW]
+            if let gridTHW {
+                let t = Int(gridTHW[0])
+                let h = Int(gridTHW[1])
+                let w = Int(gridTHW[2])
+                frames = [THW(t, h, w)]
+            } else if shape.count >= 4 {
+                frames = [THW(1, shape[shape.count - 2], shape[shape.count - 1])]
             } else {
-                h = 1; w = pixelData.count
+                frames = [THW(1, shape.last ?? 1, 1)]
             }
 
             let processedImage = LMInput.ProcessedImage(
-                pixels: pixelArray, frames: [THW(1, h, w)]
+                pixels: pixelArray, frames: frames
             )
             input = LMInput(text: .init(tokens: tokenArray), image: processedImage)
         } else {

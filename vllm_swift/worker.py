@@ -239,11 +239,19 @@ class SwiftMetalWorker:
                     pv = pv.numpy()
                 pixel_list = pv.flatten().tolist()
                 pixel_shape = list(pv.shape)
+                # Extract image_grid_thw if available
+                grid_thw = None
+                if hasattr(mm_features, "image_grid_thw"):
+                    g = mm_features.image_grid_thw
+                    if hasattr(g, "numpy"):
+                        g = g.numpy()
+                    grid_thw = g.flatten().tolist()[:3]
                 first_token = self.engine.prefill_vlm(
                     req_id,
                     prompt_tokens,
                     pixels=pixel_list,
                     pixel_shape=pixel_shape,
+                    grid_thw=grid_thw,
                     temperature=temp,
                     top_p=top_p,
                 )

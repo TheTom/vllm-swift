@@ -77,9 +77,10 @@ void vsm_engine_finish_req(
 // Get number of active requests
 int32_t vsm_engine_active_requests(vsm_engine_t engine);
 
-// VLM prefill: tokens + preprocessed pixel data
-// pixels: float32 array, already preprocessed by the Python image processor
-// num_dims/dims: shape of the pixel tensor (e.g. [1, 3, 224, 224])
+// VLM prefill: tokens + preprocessed pixel data + grid shape
+// pixels: float32 array from the HF image processor
+// pixel_dims: shape of the pixel tensor
+// grid_thw: temporal/height/width grid (3 ints: T, H, W)
 int32_t vsm_engine_prefill_vlm(
     vsm_engine_t engine,
     const char* req_id,
@@ -89,6 +90,7 @@ int32_t vsm_engine_prefill_vlm(
     int32_t pixel_count,
     const int32_t* pixel_dims,
     int32_t num_pixel_dims,
+    const int32_t* grid_thw,  // [T, H, W] or NULL
     float temperature,
     float top_p
 );
