@@ -56,8 +56,8 @@ export DYLD_LIBRARY_PATH="$PREFIX/lib:${DYLD_LIBRARY_PATH:-}"
 VENV_DIR="$HOME/.vllm-swift/venv"
 
 _find_python() {
-  # Prefer python3.12 (vLLM supports 3.10-3.13). Avoid 3.14+ (too new).
-  for p in python3.12 python3.13 python3.11 python3.10; do
+  # vLLM supports 3.10-3.13. Prefer 3.13, avoid 3.14+ (too new).
+  for p in python3.13 python3.12 python3.11 python3.10; do
     if command -v "$p" &>/dev/null; then echo "$p"; return; fi
     for dir in /opt/homebrew/bin /usr/local/bin; do
       if [ -x "$dir/$p" ]; then echo "$dir/$p"; return; fi
