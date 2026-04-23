@@ -97,11 +97,23 @@ else
 fi
 echo ""
 
-# Install Python plugin
+# Create venv and install Python plugin
+VENV_DIR="$PROJECT_DIR/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating Python virtual environment..."
+    python3 -m venv "$VENV_DIR"
+fi
 echo "Installing Python plugin..."
 cd "$PROJECT_DIR"
-pip3 install -e . --quiet 2>&1 | tail -3
-echo "  Installed: vllm-swift (editable)"
+"$VENV_DIR/bin/pip" install -q -e . 2>&1 | tail -3
+echo "  Installed: vllm-swift (editable) in .venv"
+echo ""
+
+# Install vLLM if not already present
+if ! "$VENV_DIR/bin/python3" -c "import vllm" 2>/dev/null; then
+    echo "Installing vLLM (this may take a minute)..."
+    "$VENV_DIR/bin/pip" install -q "vllm>=0.19.0" 2>&1 | tail -3
+fi
 echo ""
 
 # Create activation script
@@ -109,8 +121,9 @@ ACTIVATE_SCRIPT="$PROJECT_DIR/activate.sh"
 cat > "$ACTIVATE_SCRIPT" << EOF
 # Source this file to set up vllm-swift environment
 # Usage: source activate.sh
+source "$VENV_DIR/bin/activate"
 export DYLD_LIBRARY_PATH="$BUILD_DIR:\${DYLD_LIBRARY_PATH:-}"
-echo "vllm-swift activated (DYLD_LIBRARY_PATH set)"
+echo "vllm-swift activated (venv + DYLD_LIBRARY_PATH set)"
 EOF
 echo "Created: activate.sh (source this before running vllm serve)"
 echo ""
