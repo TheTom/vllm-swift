@@ -199,6 +199,8 @@ class TestSwiftMetalWorker:
         new_req.prompt_token_ids = [1, 2, 3, 4]
         new_req.sampling_params.temperature = 0.0
         new_req.sampling_params.top_p = 1.0
+        new_req.sampling_params.logprobs = None
+        new_req.mm_features = None  # text-only, no VLM
         cached_data = MagicMock()
         cached_data.req_ids = []
         scheduler_output.scheduled_new_reqs = [new_req]
@@ -351,6 +353,58 @@ class TestSwiftMetalWorker:
         worker.reset_mm_cache()
         assert worker.reset_prefix_cache() is True
         worker.reset_encoder_cache()
+
+    def test_execute_model_vlm_prefill(self):
+        worker = self._make_worker()
+        mock_engine = MagicMock()
+        mock_engine.prefill_vlm.return_value = 33
+        mock_engine.decode_all.return_value = []
+        worker.engine = mock_engine
+
+        scheduler_output = MagicMock()
+        new_req = MagicMock()
+        new_req.req_id = "vlm-001"
+        new_req.prompt_token_ids = [1, 2, 3]
+        new_req.sampling_params.temperature = 0.0
+        new_req.sampling_params.top_p = 1.0
+        new_req.sampling_params.logprobs = None
+        # Simulate VLM with pixel_values
+        new_req.mm_features = MagicMock()
+        new_req.mm_features.pixel_values = MagicMock()
+        new_req.mm_features.pixel_values.shape = (1, 3, 224, 224)
+        new_req.mm_features.pixel_values.flatten.return_value.tolist.return_value = [0.5] * 150528
+
+        cached_data = MagicMock()
+        cached_data.req_ids = []
+        scheduler_output.scheduled_new_reqs = [new_req]
+        scheduler_output.scheduled_cached_reqs = cached_data
+        scheduler_output.finished_req_ids = []
+
+        assert worker.execute_model(scheduler_output) is None
+        output = worker.sample_tokens(None)
+        assert output is not None
+        assert output.req_ids == ["vlm-001"]
+        assert output.sampled_token_ids == [[33]]
+        mock_engine.prefill_vlm.assert_called_once()
+
+    def test_execute_model_with_logprobs(self):
+        worker = self._make_worker()
+        mock_engine = MagicMock()
+        mock_engine.decode_all_logprobs.return_value = [("req-lp", 42, -0.3)]
+        worker.engine = mock_engine
+        worker._active_requests["req-lp"] = [10]
+        worker._request_params["req-lp"] = {"temperature": 0.0, "top_p": 1.0, "logprobs": True}
+
+        cached_data = MagicMock()
+        cached_data.req_ids = ["req-lp"]
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = []
+        scheduler_output.scheduled_cached_reqs = cached_data
+        scheduler_output.finished_req_ids = []
+
+        assert worker.execute_model(scheduler_output) is None
+        output = worker.sample_tokens(None)
+        assert output.sampled_token_ids == [[42]]
 
     def test_finished_requests_cleaned_up(self):
         worker = self._make_worker()

@@ -230,14 +230,32 @@ class SwiftMetalWorker:
             temp = getattr(sp, "temperature", 0.0)
             top_p = getattr(sp, "top_p", 1.0)
 
-            first_token = self.engine.prefill_req(
-                req_id, prompt_tokens, temperature=temp, top_p=top_p
-            )
+            # Check for multimodal (VLM) inputs
+            mm_features = getattr(new_req, "mm_features", None)
+            if mm_features and hasattr(mm_features, "pixel_values"):
+                pixels = mm_features.pixel_values
+                h = pixels.shape[-2] if hasattr(pixels, "shape") else 0
+                w = pixels.shape[-1] if hasattr(pixels, "shape") else 0
+                pixel_list = pixels.flatten().tolist()
+                first_token = self.engine.prefill_vlm(
+                    req_id,
+                    prompt_tokens,
+                    pixels=pixel_list,
+                    image_height=h,
+                    image_width=w,
+                    temperature=temp,
+                    top_p=top_p,
+                )
+            else:
+                first_token = self.engine.prefill_req(
+                    req_id, prompt_tokens, temperature=temp, top_p=top_p
+                )
 
             self._active_requests[req_id] = [first_token]
             self._request_params[req_id] = {
                 "temperature": temp,
                 "top_p": top_p,
+                "logprobs": getattr(sp, "logprobs", None) is not None,
             }
             req_ids.append(req_id)
             sampled_token_ids.append([first_token])
@@ -246,8 +264,17 @@ class SwiftMetalWorker:
         cached = scheduler_output.scheduled_cached_reqs
         cached_req_ids = list(cached.req_ids)
         if cached_req_ids:
-            batch_results = self.engine.decode_all(max_reqs=len(cached_req_ids))
-            result_map = {rid: tok for rid, tok in batch_results}
+            # Check if any request wants logprobs
+            wants_logprobs = any(
+                self._request_params.get(rid, {}).get("logprobs", False) for rid in cached_req_ids
+            )
+            if wants_logprobs:
+                lp_results = self.engine.decode_all_logprobs(max_reqs=len(cached_req_ids))
+                result_map = {rid: tok for rid, tok, _ in lp_results}
+                # TODO: build LogprobsLists from lp_results logprob values
+            else:
+                batch_results = self.engine.decode_all(max_reqs=len(cached_req_ids))
+                result_map = {rid: tok for rid, tok in batch_results}
             for req_id in cached_req_ids:
                 token = result_map.get(req_id, -1)
                 if token >= 0:

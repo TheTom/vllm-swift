@@ -470,6 +470,74 @@ public func vsm_engine_decode_all(
     }
 }
 
+/// VLM prefill: tokens + image pixels
+@_cdecl("vsm_engine_prefill_vlm")
+public func vsm_engine_prefill_vlm(
+    _ handle: UnsafeMutableRawPointer?,
+    reqId: UnsafePointer<CChar>?,
+    promptTokens: UnsafePointer<Int32>?,
+    numTokens: Int32,
+    pixels: UnsafePointer<Float>?,
+    pixelCount: Int32,
+    imageHeight: Int32,
+    imageWidth: Int32,
+    temperature: Float,
+    topP: Float
+) -> Int32 {
+    guard let handle, let promptTokens, let reqId else { return -1 }
+    let rid = String(cString: reqId)
+
+    return engineQueue.sync {
+        guard let engine = engines[handle] else { return Int32(-1) }
+
+        let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
+        let tokenArray = MLXArray(tokens)
+
+        var params = engine.generateParams
+        params.temperature = temperature
+        params.topP = topP
+
+        // Build LMInput with image if provided
+        let input: LMInput
+        if let pixels, pixelCount > 0 {
+            let pixelData = Array(UnsafeBufferPointer(start: pixels, count: Int(pixelCount)))
+            let channels = 3
+            let h = Int(imageHeight)
+            let w = Int(imageWidth)
+            let pixelArray = MLXArray(pixelData).reshaped(1, channels, h, w)
+            let processedImage = LMInput.ProcessedImage(
+                pixels: pixelArray,
+                frames: [THW(1, h, w)]
+            )
+            input = LMInput(
+                text: .init(tokens: tokenArray),
+                image: processedImage
+            )
+        } else {
+            input = LMInput(text: .init(tokens: tokenArray))
+        }
+
+        do {
+            var iterator = try TokenIterator(
+                input: input,
+                model: engine.model,
+                parameters: params
+            )
+            guard let firstToken = iterator.next() else { return Int32(-1) }
+
+            engine.sessions[rid] = RequestSession(
+                iterator: iterator,
+                temperature: temperature,
+                topP: topP
+            )
+            return Int32(firstToken)
+        } catch {
+            print("[vsm] VLM prefill error for \(rid): \(error)")
+            return Int32(-1)
+        }
+    }
+}
+
 /// Initialize batched KV caches and prefill all requests for fully batched decode.
 /// Must be called AFTER all prefill_req calls. Copies cache state into BatchedKVCache.
 @_cdecl("vsm_engine_init_batched")
@@ -542,6 +610,67 @@ public func vsm_engine_init_batched(_ handle: UnsafeMutableRawPointer?) -> Int32
         engine.batchedCaches = bCaches
         print("[vsm] Batched KV cache initialized: B=\(B), layers=\(numLayers), kvHeads=\(kvHeads), headDim=\(headDim)")
         return Int32(B)
+    }
+}
+
+/// Batch decode with logprobs — same as decode_all but computes
+/// log_softmax and extracts the sampled token's log-probability.
+@_cdecl("vsm_engine_decode_all_logprobs")
+public func vsm_engine_decode_all_logprobs(
+    _ handle: UnsafeMutableRawPointer?,
+    reqIds: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?,
+    outTokens: UnsafeMutablePointer<Int32>?,
+    outLogprobs: UnsafeMutablePointer<Float>?,
+    maxReqs: Int32
+) -> Int32 {
+    guard let handle, let reqIds, let outTokens, let outLogprobs else { return 0 }
+
+    return engineQueue.sync {
+        guard let engine = engines[handle] else { return Int32(0) }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let rids = Array(engine.sessions.keys.prefix(Int(maxReqs)))
+        guard !rids.isEmpty else { return Int32(0) }
+
+        if let qwenModel = engine.model as? Qwen3Model,
+           let bCaches = engine.batchedCaches,
+           !engine.batchSlots.isEmpty
+        {
+            let B = engine.batchSlots.count
+            let tokens = engine.batchTokens
+
+            let inputBatch = MLXArray(tokens[0..<B]).reshaped(B, 1)
+            let logitsBatch = qwenModel.fullyBatchedDecode(inputBatch, caches: bCaches)
+            let lastLogits = logitsBatch[0..., -1, 0...]  // [B, vocab]
+
+            // Compute log_softmax for logprobs
+            let logSoftmax = lastLogits - MLX.logSumExp(lastLogits, axis: -1, keepDims: true)
+
+            // Greedy sample
+            let sampledTokens = argMax(lastLogits, axis: -1)  // [B]
+            eval(sampledTokens, logSoftmax)
+
+            var count: Int32 = 0
+            let sortedSlots = engine.batchSlots.sorted { $0.value < $1.value }
+            for (rid, slotIdx) in sortedSlots {
+                let tokenId = sampledTokens[slotIdx].item(Int.self)
+                let logprob = logSoftmax[slotIdx, tokenId].item(Float.self)
+
+                engine.batchTokens[slotIdx] = tokenId
+                reqIds[Int(count)] = strdup(rid)
+                outTokens[Int(count)] = Int32(tokenId)
+                outLogprobs[Int(count)] = logprob
+                count += 1
+            }
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            engine.totalDecodeTokens += count
+            engine.totalDecodeTime += elapsed
+            return count
+        }
+
+        // Fallback: decode without logprobs
+        return vsm_engine_decode_all(handle, reqIds: reqIds, outTokens: outTokens, maxReqs: maxReqs)
     }
 }
 

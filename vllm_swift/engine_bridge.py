@@ -130,9 +130,32 @@ def _get_lib():
     _lib.vsm_engine_decode_all.restype = ctypes.c_int32
     _lib.vsm_engine_decode_all.argtypes = [
         ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_char_p),  # mutable char** for strdup'd strings
+        ctypes.POINTER(ctypes.c_char_p),
         ctypes.POINTER(ctypes.c_int32),
         ctypes.c_int32,
+    ]
+    _lib.vsm_engine_decode_all_logprobs.restype = ctypes.c_int32
+    _lib.vsm_engine_decode_all_logprobs.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+    ]
+
+    # VLM support
+    _lib.vsm_engine_prefill_vlm.restype = ctypes.c_int32
+    _lib.vsm_engine_prefill_vlm.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_float,
+        ctypes.c_float,
     ]
 
     # State management
@@ -227,6 +250,55 @@ class SwiftInferenceEngine:
         for i in range(n):
             rid = req_ids_buf[i].decode() if req_ids_buf[i] else ""
             results.append((rid, int(tokens_buf[i])))
+        return results
+
+    def prefill_vlm(
+        self,
+        req_id: str,
+        prompt_tokens: list[int],
+        pixels: list[float] | None = None,
+        image_height: int = 0,
+        image_width: int = 0,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+    ) -> int:
+        """Prefill with tokens + optional image pixels for VLM models."""
+        arr = (ctypes.c_int32 * len(prompt_tokens))(*prompt_tokens)
+        if pixels:
+            pix_arr = (ctypes.c_float * len(pixels))(*pixels)
+            return self._lib.vsm_engine_prefill_vlm(
+                self._handle,
+                req_id.encode(),
+                arr,
+                len(prompt_tokens),
+                pix_arr,
+                len(pixels),
+                image_height,
+                image_width,
+                temperature,
+                top_p,
+            )
+        return self._lib.vsm_engine_prefill_req(
+            self._handle,
+            req_id.encode(),
+            arr,
+            len(prompt_tokens),
+            temperature,
+            top_p,
+        )
+
+    def decode_all_logprobs(self, max_reqs: int = 64) -> list[tuple[str, int, float]]:
+        """Decode with logprobs. Returns (req_id, token, logprob) tuples."""
+        req_ids_buf = (ctypes.c_char_p * max_reqs)()
+        tokens_buf = (ctypes.c_int32 * max_reqs)()
+        logprobs_buf = (ctypes.c_float * max_reqs)()
+        n = self._lib.vsm_engine_decode_all_logprobs(
+            self._handle, req_ids_buf, tokens_buf, logprobs_buf, max_reqs
+        )
+        results = []
+        for i in range(n):
+            rid = req_ids_buf[i].decode() if req_ids_buf[i] else ""
+            results.append((rid, int(tokens_buf[i]), float(logprobs_buf[i])))
         return results
 
     def reset(self) -> None:

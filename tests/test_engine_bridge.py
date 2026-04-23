@@ -228,6 +228,45 @@ class TestSwiftInferenceEngine:
         assert results[0] == ("r0", 42)
         assert results[1] == ("r1", 99)
 
+    def test_decode_all_logprobs(self):
+        mock_lib = MagicMock()
+
+        def fake_logprobs(handle, req_buf, tok_buf, lp_buf, max_reqs):
+            req_buf[0] = b"r0"
+            tok_buf[0] = 42
+            lp_buf[0] = -0.5
+            return 1
+
+        mock_lib.vsm_engine_decode_all_logprobs.side_effect = fake_logprobs
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xBEEF
+        results = engine.decode_all_logprobs(max_reqs=4)
+        assert len(results) == 1
+        assert results[0] == ("r0", 42, -0.5)
+
+    def test_prefill_vlm_without_pixels(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_prefill_req.return_value = 55
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xCAFE
+        token = engine.prefill_vlm("req1", [1, 2, 3])
+        assert token == 55
+        mock_lib.vsm_engine_prefill_req.assert_called_once()
+
+    def test_prefill_vlm_with_pixels(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_prefill_vlm.return_value = 77
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xF00D
+        token = engine.prefill_vlm(
+            "req1", [1, 2], pixels=[0.5] * 12, image_height=2, image_width=2
+        )
+        assert token == 77
+        mock_lib.vsm_engine_prefill_vlm.assert_called_once()
+
     def test_kv_scheme_passed_to_bridge(self):
         mock_lib = MagicMock()
         mock_lib.vsm_engine_create.return_value = 0x1

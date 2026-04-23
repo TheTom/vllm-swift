@@ -77,6 +77,23 @@ void vsm_engine_finish_req(
 // Get number of active requests
 int32_t vsm_engine_active_requests(vsm_engine_t engine);
 
+// VLM prefill: process prompt tokens + image pixels
+// pixels: raw float32 pixel data [C, H, W] or [N, C, H, W]
+// pixel_count: total number of float values
+// image_height, image_width: spatial dimensions
+int32_t vsm_engine_prefill_vlm(
+    vsm_engine_t engine,
+    const char* req_id,
+    const int32_t* prompt_tokens,
+    int32_t num_tokens,
+    const float* pixels,
+    int32_t pixel_count,
+    int32_t image_height,
+    int32_t image_width,
+    float temperature,
+    float top_p
+);
+
 // Batch decode: step all active sessions in one call.
 // Writes req_ids and tokens to caller-provided buffers.
 // Returns number of tokens generated.
@@ -85,6 +102,16 @@ int32_t vsm_engine_decode_all(
     char** req_ids,          // output: request IDs (caller frees with free())
     int32_t* out_tokens,     // output: token per request
     int32_t max_reqs         // buffer capacity
+);
+
+// Batch decode with logprobs: same as decode_all but also returns
+// the log-probability of each sampled token.
+int32_t vsm_engine_decode_all_logprobs(
+    vsm_engine_t engine,
+    char** req_ids,
+    int32_t* out_tokens,
+    float* out_logprobs,     // output: logprob per sampled token
+    int32_t max_reqs
 );
 
 // Batch decode: generate N tokens, write to output buffer
