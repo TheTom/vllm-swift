@@ -22,6 +22,28 @@ All numbers measured on the same hardware. vllm-swift uses the Swift/Metal path 
 
 \*vllm-metal 7B number shown (no 4B test available).
 
+### TurboQuant+ KV Cache Compression
+
+All numbers from mlx-swift-lm on M5 Max. Same model code used by vllm-swift.
+
+**Qwen3.5 9B (4-bit weights)**
+
+| KV Cache | Compression | PPL @1K | PPL @32K | Decode @1K | Decode @32K |
+|----------|:-----------:|:------:|:-------:|:----------:|:-----------:|
+| FP16 | 1.0x | 1.87 | 2.25 | 91 tok/s | 80 tok/s |
+| turbo4v2 | 3.2x | — | — | — | — |
+| turbo3 | 4.6x | 1.96 | 2.12 | 94 tok/s | 79 tok/s |
+
+**Qwen3.5 2B (4-bit weights)**
+
+| KV Cache | Compression | PPL @1K | PPL @32K | Decode @1K | Decode @32K |
+|----------|:-----------:|:------:|:-------:|:----------:|:-----------:|
+| FP16 | 1.0x | 2.72 | 4.40 | 264 tok/s | 157 tok/s |
+| turbo4v2 | 3.2x | 3.22 | 3.72 | 265 tok/s | 157 tok/s |
+| turbo3 | 4.6x | 3.95 | 3.89 | 264 tok/s | 157 tok/s |
+
+TurboQuant+ compresses KV cache 3-5x with negligible PPL impact. Decode speed is unchanged — compression is free during memory-bound decode.
+
 ## Architecture
 
 ```
