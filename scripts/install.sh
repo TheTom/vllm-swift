@@ -127,14 +127,22 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 echo "Installing Python plugin..."
 cd "$PROJECT_DIR"
-"$VENV_DIR/bin/pip" install -q -e . 2>&1 | tail -3
+"$VENV_DIR/bin/pip" install -e . 2>&1 | tail -5
 echo "  Installed: vllm-swift (editable) in .venv"
 echo ""
 
 # Install vLLM if not already present
 if ! "$VENV_DIR/bin/python3" -c "import vllm" 2>/dev/null; then
-    echo "Installing vLLM (this may take a minute)..."
-    "$VENV_DIR/bin/pip" install -q "vllm>=0.19.0" 2>&1 | tail -3
+    echo "Installing vLLM (this may take a few minutes)..."
+    "$VENV_DIR/bin/pip" install "vllm>=0.19.0" 2>&1 | tail -10
+    if ! "$VENV_DIR/bin/python3" -c "import vllm" 2>/dev/null; then
+        echo ""
+        echo "WARNING: vLLM installation failed. You may need to install it manually:"
+        echo "  source .venv/bin/activate"
+        echo "  pip install vllm"
+        echo ""
+        echo "activate.sh will still be created so you can set up vLLM yourself."
+    fi
 fi
 echo ""
 

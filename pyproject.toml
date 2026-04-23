@@ -7,9 +7,7 @@ name = "vllm-swift"
 version = "0.1.0"
 description = "vLLM Metal plugin powered by mlx-swift — high-performance LLM inference on Apple Silicon"
 requires-python = ">=3.10"
-dependencies = [
-    "vllm>=0.19.0",
-]
+dependencies = []  # vLLM installed separately (build from source is complex)
 
 [project.entry-points."vllm.platform_plugins"]
 swift = "vllm_swift:register"
