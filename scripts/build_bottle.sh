@@ -55,10 +55,29 @@ PREFIX="$(cd "$(dirname "$0")/.." && pwd)"
 export DYLD_LIBRARY_PATH="$PREFIX/lib:${DYLD_LIBRARY_PATH:-}"
 VENV_DIR="$HOME/.vllm-swift/venv"
 
+_find_python() {
+  # Prefer python3.12+, fall back to python3
+  for p in python3.14 python3.13 python3.12 python3.11 python3.10; do
+    if command -v "$p" &>/dev/null; then echo "$p"; return; fi
+  done
+  # Check system python3 version
+  local ver=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
+  if [ "${ver:-0}" -ge 10 ]; then echo "python3"; return; fi
+  echo ""
+}
+
 _ensure_venv() {
   if [ ! -d "$VENV_DIR" ]; then
+    PYTHON=$(_find_python)
+    if [ -z "$PYTHON" ]; then
+      echo "ERROR: Python 3.10+ required. Install via:"
+      echo "  brew install python@3.12"
+      echo "  or: https://www.python.org/downloads/"
+      exit 1
+    fi
     echo "Setting up vllm-swift Python environment (one time)..."
-    python3 -m venv "$VENV_DIR"
+    echo "Using: $PYTHON ($($PYTHON --version 2>&1))"
+    "$PYTHON" -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install -q torch --index-url https://download.pytorch.org/whl/cpu
     "$VENV_DIR/bin/pip" install -q "vllm>=0.19.0"
     "$VENV_DIR/bin/pip" install -q -e "$PREFIX/libexec"
