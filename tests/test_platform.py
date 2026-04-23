@@ -13,6 +13,7 @@ class TestSwiftMetalPlatform:
         # Only assert available if MLX is actually installed
         try:
             import mlx.core as mx
+
             has_mlx = mx.metal.is_available()
         except (ImportError, AttributeError):
             has_mlx = False
