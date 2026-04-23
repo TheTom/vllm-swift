@@ -160,13 +160,13 @@ Compress KV cache 3-5x to fit longer context with no measurable impact on throug
 vllm-swift serve ~/models/Qwen3-4B-4bit \
   --served-model-name qwen3-4b \
   --max-model-len 40960 \
-  --additional-config '{"kv_scheme": "turbo3", "kv_bits": 3}'
+  --additional-config '{"kv_scheme": "turbo4v2", "kv_bits": 4}'
 ```
 
 | Scheme | Compression | Best for |
 |--------|:-----------:|----------|
-| `turbo3` | 4.6x | Maximum compression, long context |
-| `turbo4v2` | 3.2x | Balanced quality/compression |
+| `turbo4v2` | 3.2x | Recommended — best quality/compression balance |
+| `turbo3` | 4.6x | Maximum compression, higher PPL trade-off |
 
 ### Full setup (agent + reasoning + TurboQuant+)
 
@@ -176,7 +176,7 @@ vllm-swift serve ~/models/Qwen3-4B-4bit \
   --max-model-len 40960 \
   --enable-auto-tool-choice --tool-call-parser hermes \
   --enable-reasoning --reasoning-parser deepseek_r1 \
-  --additional-config '{"kv_scheme": "turbo3", "kv_bits": 3}'
+  --additional-config '{"kv_scheme": "turbo4v2", "kv_bits": 4}'
 ```
 
 ### All flags
