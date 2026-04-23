@@ -274,6 +274,29 @@ class TestSwiftInferenceEngine:
         assert engine.init_batched() == 4
         mock_lib.vsm_engine_init_batched.assert_called_once_with(0xBA7C4)
 
+    def test_prompt_logprobs(self):
+        mock_lib = MagicMock()
+
+        def fake_prompt_lp(handle, tokens, n, out):
+            for i in range(n - 1):
+                out[i] = -0.5 - i * 0.1
+            return n - 1
+
+        mock_lib.vsm_engine_prompt_logprobs.side_effect = fake_prompt_lp
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xABCD
+        results = engine.prompt_logprobs([1, 2, 3, 4])
+        assert len(results) == 3
+        assert abs(results[0] - (-0.5)) < 0.01
+
+    def test_prompt_logprobs_short_input(self):
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = MagicMock()
+        engine._handle = 0x1
+        assert engine.prompt_logprobs([1]) == []
+        assert engine.prompt_logprobs([]) == []
+
     def test_add_batch_slot(self):
         mock_lib = MagicMock()
         mock_lib.vsm_engine_add_batch_slot.return_value = 2

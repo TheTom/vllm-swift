@@ -80,6 +80,7 @@ Metal GPU
 - Auto model download from HuggingFace Hub
 - TurboQuant+ KV cache compression (`turbo3`, `turbo4v2`) via mlx-swift-lm
 - Decode logprobs (log-probability of sampled tokens)
+- Prompt logprobs (per-token log-probability during prefill)
 - Greedy and temperature sampling
 - EOS / stop token detection (vLLM scheduler)
 - VLM (vision-language model) support (experimental)
@@ -117,7 +118,6 @@ All standard `vllm serve` flags work — vllm-swift is a drop-in backend.
 
 ## Known Limitations
 
-- **Prompt logprobs** not yet supported (decode logprobs work)
 - **LoRA** not supported (Swift engine limitation)
 - **Chunked prefill** disabled (Swift engine handles full sequences)
 - **top_p sampling** not supported in batched decode path (temperature works)

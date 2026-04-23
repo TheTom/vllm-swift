@@ -155,6 +155,16 @@ int32_t vsm_engine_remove_batch_slot(
     const char* req_id
 );
 
+// Prompt logprobs: compute log-probability of each prompt token given
+// its preceding context. Writes (num_tokens - 1) floats to out_logprobs.
+// Returns number of logprobs written.
+int32_t vsm_engine_prompt_logprobs(
+    vsm_engine_t engine,
+    const int32_t* prompt_tokens,
+    int32_t num_tokens,
+    float* out_logprobs
+);
+
 // Reset KV cache (new conversation)
 void vsm_engine_reset(vsm_engine_t engine);
 

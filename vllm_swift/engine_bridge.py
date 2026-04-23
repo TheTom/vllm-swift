@@ -133,6 +133,13 @@ def _get_lib():
     _lib.vsm_engine_add_batch_slot.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _lib.vsm_engine_remove_batch_slot.restype = ctypes.c_int32
     _lib.vsm_engine_remove_batch_slot.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _lib.vsm_engine_prompt_logprobs.restype = ctypes.c_int32
+    _lib.vsm_engine_prompt_logprobs.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+    ]
     _lib.vsm_engine_decode_all.restype = ctypes.c_int32
     _lib.vsm_engine_decode_all.argtypes = [
         ctypes.c_void_p,
@@ -253,6 +260,20 @@ class SwiftInferenceEngine:
         Returns number of batched requests, or -1 if model doesn't support it.
         """
         return self._lib.vsm_engine_init_batched(self._handle)
+
+    def prompt_logprobs(self, prompt_tokens: list[int]) -> list[float]:
+        """Compute log-probability of each prompt token given preceding context.
+
+        Returns list of (numTokens - 1) logprobs. logprobs[i] is the
+        log-probability of prompt_tokens[i+1] given prompt_tokens[0..i].
+        """
+        n = len(prompt_tokens)
+        if n < 2:
+            return []
+        arr = (ctypes.c_int32 * n)(*prompt_tokens)
+        out = (ctypes.c_float * (n - 1))()
+        count = self._lib.vsm_engine_prompt_logprobs(self._handle, arr, n, out)
+        return [float(out[i]) for i in range(count)]
 
     def add_batch_slot(self, req_id: str) -> int:
         """Add a request to the batched KV cache incrementally.

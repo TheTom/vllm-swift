@@ -341,6 +341,46 @@ public func vsm_engine_prefill_req(
     }
 }
 
+/// Compute prompt logprobs: for each position i, the log-probability of token[i+1]
+/// given tokens[0..i]. Returns number of logprobs written (numTokens - 1).
+/// outLogprobs must have capacity for at least (numTokens - 1) floats.
+@_cdecl("vsm_engine_prompt_logprobs")
+public func vsm_engine_prompt_logprobs(
+    _ handle: UnsafeMutableRawPointer?,
+    promptTokens: UnsafePointer<Int32>?,
+    numTokens: Int32,
+    outLogprobs: UnsafeMutablePointer<Float>?
+) -> Int32 {
+    guard let handle, let promptTokens, let outLogprobs, numTokens > 1 else { return 0 }
+
+    return engineQueue.sync { () -> Int32 in
+        guard let engine = engines[handle] else { return Int32(0) }
+
+        let n = Int(numTokens)
+        let tokens = (0..<n).map { Int(promptTokens[$0]) }
+        let tokenArray = MLXArray(tokens)
+
+        // Run model forward on full prompt — no KV cache needed
+        let input = LMInput(text: .init(tokens: tokenArray))
+        let result = engine.model(input.text.tokens.reshaped(1, n), cache: [any KVCache]())
+        // result: [1, seq_len, vocab_size]
+        let logits = result.squeezed(axis: 0)  // [seq_len, vocab]
+
+        // log_softmax over vocab dimension
+        let logSoftmax = logits - MLX.logSumExp(logits, axis: -1, keepDims: true)
+        eval(logSoftmax)
+
+        // For each position i (0..n-2), extract logprob of token[i+1]
+        let count = n - 1
+        for i in 0..<count {
+            let nextToken = tokens[i + 1]
+            outLogprobs[i] = logSoftmax[i, nextToken].item(Float.self)
+        }
+
+        return Int32(count)
+    }
+}
+
 @_cdecl("vsm_engine_decode_step_req")
 public func vsm_engine_decode_step_req(
     _ handle: UnsafeMutableRawPointer?,
