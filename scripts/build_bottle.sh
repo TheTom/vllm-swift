@@ -86,9 +86,12 @@ _ensure_venv() {
   if [ ! -d "$VENV_DIR" ]; then
     "$PYTHON" -m venv "$VENV_DIR"
   fi
-  "$VENV_DIR/bin/pip" install -q torch --index-url https://download.pytorch.org/whl/cpu
-  CFLAGS="-Wno-parentheses" "$VENV_DIR/bin/pip" install "vllm>=0.19.0" 2>&1 | tail -5
+  echo "Installing PyTorch (this may take a minute)..."
+  "$VENV_DIR/bin/pip" install --progress-bar on torch --index-url https://download.pytorch.org/whl/cpu
+  echo "Installing vLLM (this may take a few minutes)..."
+  CFLAGS="-Wno-parentheses" "$VENV_DIR/bin/pip" install --progress-bar on "vllm>=0.19.0"
   # Install plugin
+  echo "Installing vllm-swift plugin..."
   if [ -f "$PREFIX/libexec/pyproject.toml" ]; then
     cd "$PREFIX/libexec" && "$VENV_DIR/bin/pip" install -q . && cd - >/dev/null
   fi
