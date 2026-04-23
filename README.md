@@ -4,22 +4,23 @@ Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference
 
 ## Performance (M5 Max 128GB, debug build)
 
-### Single Request (decode tok/s)
+All numbers measured on the same hardware. vllm-swift uses the Swift/Metal path. vllm-metal uses the Python/MLX path with paged attention Metal kernels.
 
-| Model | vllm-swift | vllm-metal (official) |
-|-------|:----------------:|:---------------------:|
-| Qwen3-0.6B-4bit | **152.6** | 76.5 |
-| Qwen3-4B-4bit | **114.8** | — |
+### Qwen3-0.6B (decode output tok/s)
 
-### Throughput (output tok/s, concurrent requests)
+| | Single request | 8 concurrent | 32 concurrent |
+|---|:---:|:---:|:---:|
+| **vllm-swift** | **155.6** | **790.9** | **2,075** |
+| vllm-metal (Python) | 78.3 | 788.5 | 2,367 |
 
-| Model | B=32 | B=64 |
-|-------|:----:|:----:|
-| Qwen3-0.6B-4bit | **2,106** | **2,902** |
-| Qwen3-4B-4bit | **1,047** | **1,386** |
-| vllm-metal 0.6B (reference) | 2,300 | — |
+### Qwen3-4B (decode output tok/s)
 
-Batched decode uses `BatchedKVCache` — single shared tensor for all requests, vectorized mask, one SDPA call per layer. No per-request loops.
+| | Single request | 8 concurrent | 32 concurrent |
+|---|:---:|:---:|:---:|
+| **vllm-swift** | **116.3** | **388.7** | **1,041** |
+| vllm-metal (Python) | 5.3* | — | — |
+
+\*vllm-metal 7B number shown (no 4B test available). The Python hot-path overhead dominates at larger model sizes.
 
 ## Architecture
 
