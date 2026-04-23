@@ -247,9 +247,11 @@ rm -rf $(brew --cache)/downloads/*vllm*
 brew tap TheTom/tap && brew install vllm-swift
 ```
 
-**"No module named vllm" after brew install:**
+**"No module named vllm" or plugin not loading after brew install:**
 ```bash
-rm -rf ~/.vllm-swift/venv
+brew uninstall vllm-swift && brew untap TheTom/tap
+rm -rf $(brew --cache)/downloads/*vllm* ~/.vllm-swift
+brew tap TheTom/tap && brew install vllm-swift
 vllm-swift setup
 ```
 
