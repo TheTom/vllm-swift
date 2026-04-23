@@ -39,21 +39,20 @@ Up to 2.4x higher throughput at low concurrency by removing Python from the infe
 
 Decode output tok/s. Prompt=18 tokens, generation=50 tokens (short-context decode benchmark), greedy.
 
-> **Bridge direct** = raw Swift/Metal engine (no vLLM scheduler)  
-> **vllm serve** = full API server (scheduling + HTTP overhead)
+> Both measured via offline benchmark (no HTTP overhead). **vllm-swift** uses the Swift/Metal engine via ctypes. **vllm-metal** uses the Python/MLX engine via vLLM's offline API.
 
 ### Qwen3-0.6B
 
 | | Single | 8 concurrent | 32 concurrent | 64 concurrent |
 |---|:---:|:---:|:---:|:---:|
-| **vllm-swift** (bridge direct) | **340** | **1,512** | **2,862** | **3,383** |
+| **vllm-swift** | **340** | **1,512** | **2,862** | **3,383** |
 | vllm-metal (Python/MLX) | 142 | 1,170 | 2,457 | 3,017 |
 
 ### Qwen3-4B
 
 | | Single | 8 concurrent | 32 concurrent | 64 concurrent |
 |---|:---:|:---:|:---:|:---:|
-| **vllm-swift** (bridge direct) | **149** | **479** | **1,166** | **1,519** |
+| **vllm-swift** | **149** | **479** | **1,166** | **1,519** |
 | vllm-metal (Python/MLX) | 105 | 408 | 1,067 | 1,387 |
 
 ### [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV Cache Compression
