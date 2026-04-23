@@ -223,11 +223,10 @@ class SwiftMetalWorker:
             req_ids.append(req_id)
             sampled_token_ids.append([first_token])
 
-        # Handle cached requests (decode step per request)
+        # Decode step per request (sequential — batch inference TBD)
         cached = scheduler_output.scheduled_cached_reqs
         for req_id in cached.req_ids:
             token = self.engine.decode_step_req(req_id)
-
             if token >= 0:
                 self._active_requests.setdefault(req_id, []).append(token)
                 sampled_token_ids.append([token])

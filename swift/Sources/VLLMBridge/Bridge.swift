@@ -317,6 +317,59 @@ public func vsm_engine_decode_step_req(
     }
 }
 
+/// Batch decode with two-phase GPU batching.
+/// Phase 1: stepAsync() on all sessions (builds graphs, no GPU sync).
+/// Phase 2: readToken() on all sessions (batched GPU sync).
+@_cdecl("vsm_engine_decode_all")
+public func vsm_engine_decode_all(
+    _ handle: UnsafeMutableRawPointer?,
+    reqIds: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?,
+    outTokens: UnsafeMutablePointer<Int32>?,
+    maxReqs: Int32
+) -> Int32 {
+    guard let handle, let reqIds, let outTokens else { return 0 }
+
+    return engineQueue.sync {
+        guard let engine = engines[handle] else { return Int32(0) }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let rids = Array(engine.sessions.keys.prefix(Int(maxReqs)))
+
+        // Phase 1: build all forward graphs (no GPU sync)
+        var stepped: [String] = []
+        for rid in rids {
+            guard var session = engine.sessions[rid] else { continue }
+            if session.iterator.stepAsync() {
+                stepped.append(rid)
+            }
+            engine.sessions[rid] = session
+        }
+
+        // Phase 2: read all tokens (GPU batches the sync)
+        var count: Int32 = 0
+        for rid in stepped {
+            guard var session = engine.sessions[rid] else { continue }
+            let tokenId = session.iterator.readToken()
+            engine.sessions[rid] = session
+            reqIds[Int(count)] = strdup(rid)
+            outTokens[Int(count)] = Int32(tokenId)
+            count += 1
+        }
+
+        // Finished sessions
+        for rid in rids where !stepped.contains(rid) {
+            reqIds[Int(count)] = strdup(rid)
+            outTokens[Int(count)] = -1
+            count += 1
+        }
+
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        engine.totalDecodeTokens += count
+        engine.totalDecodeTime += elapsed
+        return count
+    }
+}
+
 @_cdecl("vsm_engine_finish_req")
 public func vsm_engine_finish_req(
     _ handle: UnsafeMutableRawPointer?,

@@ -111,6 +111,13 @@ def _get_lib():
     _lib.vsm_engine_finish_req.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _lib.vsm_engine_active_requests.restype = ctypes.c_int32
     _lib.vsm_engine_active_requests.argtypes = [ctypes.c_void_p]
+    _lib.vsm_engine_decode_all.restype = ctypes.c_int32
+    _lib.vsm_engine_decode_all.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_char_p),  # mutable char** for strdup'd strings
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.c_int32,
+    ]
 
     # State management
     _lib.vsm_engine_reset.restype = None
@@ -191,6 +198,23 @@ class SwiftInferenceEngine:
 
     def active_requests(self) -> int:
         return self._lib.vsm_engine_active_requests(self._handle)
+
+    def decode_all(self, max_reqs: int = 64) -> list[tuple[str, int]]:
+        """Decode one step for ALL active sessions in a single call.
+
+        Returns list of (req_id, token) pairs. Token=-1 means EOS.
+        """
+        req_ids_buf = (ctypes.c_char_p * max_reqs)()
+        tokens_buf = (ctypes.c_int32 * max_reqs)()
+        n = self._lib.vsm_engine_decode_all(self._handle, req_ids_buf, tokens_buf, max_reqs)
+        results = []
+        for i in range(n):
+            rid = req_ids_buf[i].decode() if req_ids_buf[i] else ""
+            results.append((rid, int(tokens_buf[i])))
+            # Free the strdup'd string
+            if req_ids_buf[i]:
+                ctypes.cdll.LoadLibrary("libc.dylib").free(req_ids_buf[i])
+        return results
 
     def reset(self) -> None:
         self._lib.vsm_engine_reset(self._handle)

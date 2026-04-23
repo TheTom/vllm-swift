@@ -77,6 +77,16 @@ void vsm_engine_finish_req(
 // Get number of active requests
 int32_t vsm_engine_active_requests(vsm_engine_t engine);
 
+// Batch decode: step all active sessions in one call.
+// Writes req_ids and tokens to caller-provided buffers.
+// Returns number of tokens generated.
+int32_t vsm_engine_decode_all(
+    vsm_engine_t engine,
+    char** req_ids,          // output: request IDs (caller frees with free())
+    int32_t* out_tokens,     // output: token per request
+    int32_t max_reqs         // buffer capacity
+);
+
 // Batch decode: generate N tokens, write to output buffer
 // Returns: number of tokens actually generated
 int32_t vsm_engine_decode_batch(
