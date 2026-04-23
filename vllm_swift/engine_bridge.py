@@ -9,10 +9,26 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_LIB_PATH = os.environ.get(
-    "VLLM_SWIFT_METAL_LIB",
-    str(Path(__file__).parent.parent / "swift" / "libvllm_swift.dylib"),
-)
+
+def _find_lib_path() -> str:
+    """Find the Swift bridge dylib, checking multiple locations."""
+    if env_path := os.environ.get("VLLM_SWIFT_METAL_LIB"):
+        return env_path
+
+    base = Path(__file__).parent.parent / "swift"
+    candidates = [
+        base / ".build" / "arm64-apple-macosx" / "release" / "libVLLMBridge.dylib",
+        base / ".build" / "arm64-apple-macosx" / "debug" / "libVLLMBridge.dylib",
+        base / "libvllm_swift.dylib",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+
+    return str(candidates[0])  # default to release path
+
+
+_LIB_PATH = _find_lib_path()
 
 _lib = None
 

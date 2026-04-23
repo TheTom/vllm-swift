@@ -355,20 +355,40 @@ public func vsm_engine_decode_all(
             let inputBatch = MLXArray(tokens[0..<B]).reshaped(B, 1)
             let logitsBatch = qwenModel.fullyBatchedDecode(inputBatch, caches: bCaches)
 
-            // Sample all tokens at once (greedy argmax batched)
             let lastLogits = logitsBatch[0..., -1, 0...]  // [B, vocab]
-            let sampledTokens = argMax(lastLogits, axis: -1)  // [B]
-            eval(sampledTokens)
 
-            // Read results
-            var count: Int32 = 0
+            // Check if all requests use greedy sampling
             let sortedSlots = engine.batchSlots.sorted { $0.value < $1.value }
-            for (rid, slotIdx) in sortedSlots {
-                let tokenId = sampledTokens[slotIdx].item(Int.self)
-                engine.batchTokens[slotIdx] = tokenId
-                reqIds[Int(count)] = strdup(rid)
-                outTokens[Int(count)] = Int32(tokenId)
-                count += 1
+            let allGreedy = sortedSlots.allSatisfy { (rid, _) in
+                engine.sessions[rid]?.temperature == 0
+            }
+
+            var count: Int32 = 0
+            if allGreedy {
+                // Fast path: batched argmax
+                let sampledTokens = argMax(lastLogits, axis: -1)
+                eval(sampledTokens)
+                for (rid, slotIdx) in sortedSlots {
+                    let tokenId = sampledTokens[slotIdx].item(Int.self)
+                    engine.batchTokens[slotIdx] = tokenId
+                    reqIds[Int(count)] = strdup(rid)
+                    outTokens[Int(count)] = Int32(tokenId)
+                    count += 1
+                }
+            } else {
+                // Per-request sampling with temperature/top_p
+                for (rid, slotIdx) in sortedSlots {
+                    let logits_i = lastLogits[slotIdx]
+                    let session = engine.sessions[rid]
+                    let token = session?.iterator.sampler.sample(logits: logits_i)
+                        ?? argMax(logits_i, axis: -1)
+                    eval(token)
+                    let tokenId = token.item(Int.self)
+                    engine.batchTokens[slotIdx] = tokenId
+                    reqIds[Int(count)] = strdup(rid)
+                    outTokens[Int(count)] = Int32(tokenId)
+                    count += 1
+                }
             }
 
             let elapsed = CFAbsoluteTimeGetCurrent() - start
