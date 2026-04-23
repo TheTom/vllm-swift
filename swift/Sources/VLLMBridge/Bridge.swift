@@ -387,32 +387,21 @@ public func vsm_engine_decode_all(
                 engine.sessions[rid]?.temperature == 0
             }
 
+            // Match TokenIterator.next() pattern: return previousY, advance to next
+            let sampledTokens = argMax(lastLogits, axis: -1)
+            eval(sampledTokens)
+
             var count: Int32 = 0
-            if allGreedy {
-                // Fast path: batched argmax
-                let sampledTokens = argMax(lastLogits, axis: -1)
-                eval(sampledTokens)
-                for (rid, slotIdx) in sortedSlots {
-                    let tokenId = sampledTokens[slotIdx].item(Int.self)
-                    engine.batchTokens[slotIdx] = tokenId
-                    reqIds[Int(count)] = strdup(rid)
-                    outTokens[Int(count)] = Int32(tokenId)
-                    count += 1
-                }
-            } else {
-                // Per-request sampling with temperature/top_p
-                for (rid, slotIdx) in sortedSlots {
-                    let logits_i = lastLogits[slotIdx]
-                    let session = engine.sessions[rid]
-                    let token = session?.iterator.sampler.sample(logits: logits_i)
-                        ?? argMax(logits_i, axis: -1)
-                    eval(token)
-                    let tokenId = token.item(Int.self)
-                    engine.batchTokens[slotIdx] = tokenId
-                    reqIds[Int(count)] = strdup(rid)
-                    outTokens[Int(count)] = Int32(tokenId)
-                    count += 1
-                }
+            for (rid, slotIdx) in sortedSlots {
+                // Return the INPUT token (previousY pattern)
+                let returnToken = engine.batchTokens[slotIdx]
+                // Advance to the model's output for next step
+                let nextToken = sampledTokens[slotIdx].item(Int.self)
+                engine.batchTokens[slotIdx] = nextToken
+
+                reqIds[Int(count)] = strdup(rid)
+                outTokens[Int(count)] = Int32(returnToken)
+                count += 1
             }
 
             let elapsed = CFAbsoluteTimeGetCurrent() - start
