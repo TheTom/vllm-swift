@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// vllm-swift-metal C bridge — Python ↔ Swift inference engine
+// vllm-swift C bridge — Python ↔ Swift inference engine
 //
 // Exposes a minimal C API for the Python plugin to drive the Swift
 // mlx-swift-lm inference engine. All heavy compute stays in Swift/Metal.

@@ -5,12 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm_swift_metal.engine_bridge import PerfStats, SwiftInferenceEngine
+from vllm_swift.engine_bridge import PerfStats, SwiftInferenceEngine
 
 
 class TestGetLib:
     def test_raises_on_missing_file(self):
-        import vllm_swift_metal.engine_bridge as eb
+        import vllm_swift.engine_bridge as eb
 
         old_path = eb._LIB_PATH
         old_lib = eb._lib
@@ -24,7 +24,7 @@ class TestGetLib:
             eb._lib = old_lib
 
     def test_returns_cached_lib(self):
-        import vllm_swift_metal.engine_bridge as eb
+        import vllm_swift.engine_bridge as eb
 
         sentinel = object()
         old_lib = eb._lib
@@ -37,9 +37,9 @@ class TestGetLib:
     def test_loads_real_dylib_if_exists(self):
         import os
 
-        import vllm_swift_metal.engine_bridge as eb
+        import vllm_swift.engine_bridge as eb
 
-        dylib = os.path.expanduser("~/dev/vllm-swift-metal/swift/libvllm_swift_metal.dylib")
+        dylib = os.path.expanduser("~/dev/vllm-swift/swift/libvllm_swift.dylib")
         if not os.path.exists(dylib):
             pytest.skip("dylib not built")
         old_lib = eb._lib
@@ -75,7 +75,7 @@ class TestPerfStats:
 
 class TestSwiftInferenceEngine:
     def test_init_raises_on_missing_dylib(self):
-        with patch("vllm_swift_metal.engine_bridge._LIB_PATH", "/nonexistent/path.dylib"):
+        with patch("vllm_swift.engine_bridge._LIB_PATH", "/nonexistent/path.dylib"):
             with pytest.raises(FileNotFoundError, match="Swift Metal engine"):
                 SwiftInferenceEngine(model_path="/tmp/model")
 
@@ -83,7 +83,7 @@ class TestSwiftInferenceEngine:
         mock_lib = MagicMock()
         mock_lib.vsm_engine_create.return_value = None
 
-        with patch("vllm_swift_metal.engine_bridge._get_lib", return_value=mock_lib):
+        with patch("vllm_swift.engine_bridge._get_lib", return_value=mock_lib):
             with pytest.raises(RuntimeError, match="Failed to create"):
                 SwiftInferenceEngine(model_path="/tmp/model")
 
@@ -96,7 +96,7 @@ class TestSwiftInferenceEngine:
         mock_lib.vsm_engine_model_memory_bytes.return_value = 4_000_000_000
         mock_lib.vsm_engine_prefill.return_value = 42
 
-        with patch("vllm_swift_metal.engine_bridge._get_lib", return_value=mock_lib):
+        with patch("vllm_swift.engine_bridge._get_lib", return_value=mock_lib):
             engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
             engine._lib = mock_lib
             engine._handle = 0xDEAD
@@ -206,7 +206,7 @@ class TestSwiftInferenceEngine:
         mock_lib.vsm_engine_head_dim.return_value = 128
         mock_lib.vsm_engine_model_memory_bytes.return_value = 1_000_000
 
-        with patch("vllm_swift_metal.engine_bridge._get_lib", return_value=mock_lib):
+        with patch("vllm_swift.engine_bridge._get_lib", return_value=mock_lib):
             engine = SwiftInferenceEngine(
                 model_path="/tmp/model",
                 kv_scheme="turbo3",

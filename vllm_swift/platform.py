@@ -92,7 +92,7 @@ class SwiftMetalPlatform(Platform):
 
         # Use our Swift worker
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm_swift_metal.worker.SwiftMetalWorker"
+            parallel_config.worker_cls = "vllm_swift.worker.SwiftMetalWorker"
 
         # Single-process — no IPC overhead
         if parallel_config.distributed_executor_backend in ("auto", None):
@@ -125,5 +125,5 @@ class SwiftMetalPlatformPlugin:
     def register() -> str | None:
         if SwiftMetalPlatform.is_available():
             logger.info("Swift Metal platform plugin activated")
-            return "vllm_swift_metal.platform.SwiftMetalPlatform"
+            return "vllm_swift.platform.SwiftMetalPlatform"
         return None

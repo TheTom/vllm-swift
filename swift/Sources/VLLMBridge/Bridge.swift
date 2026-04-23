@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// vllm-swift-metal C bridge implementation
+// vllm-swift C bridge implementation
 //
 // Wraps mlx-swift-lm's TokenIterator to expose a C API for Python ctypes.
 // All GPU compute stays here in Swift/Metal — Python only drives scheduling.

@@ -5,6 +5,6 @@ __version__ = "0.1.0"
 
 
 def register() -> str | None:
-    from vllm_swift_metal.platform import SwiftMetalPlatformPlugin
+    from vllm_swift.platform import SwiftMetalPlatformPlugin
 
     return SwiftMetalPlatformPlugin.register()

@@ -18,7 +18,7 @@ LIB_PATH = str(SWIFT_BUILD / "libVLLMBridge.dylib")
 
 if not os.path.exists(LIB_PATH):
     # Try the copied location
-    LIB_PATH = str(Path(__file__).parent / "swift" / "libvllm_swift_metal.dylib")
+    LIB_PATH = str(Path(__file__).parent / "swift" / "libvllm_swift.dylib")
 
 lib = ctypes.CDLL(LIB_PATH)
 

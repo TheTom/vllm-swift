@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 _LIB_PATH = os.environ.get(
     "VLLM_SWIFT_METAL_LIB",
-    str(Path(__file__).parent.parent / "swift" / "libvllm_swift_metal.dylib"),
+    str(Path(__file__).parent.parent / "swift" / "libvllm_swift.dylib"),
 )
 
 _lib = None

@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import ModelRunnerOutput
 
-from vllm_swift_metal.engine_bridge import SwiftInferenceEngine
+from vllm_swift.engine_bridge import SwiftInferenceEngine
 
 if TYPE_CHECKING:
     pass

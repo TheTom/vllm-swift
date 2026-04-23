@@ -1,12 +1,12 @@
-# vllm-swift-metal
+# vllm-swift
 
-vLLM plugin for Apple Silicon. Inference runs through a Swift/Metal C bridge — zero Python in the GPU hot path.
+Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference hot path.
 
 ## Performance (M5 Max 128GB, debug build)
 
 ### Single Request (decode tok/s)
 
-| Model | vllm-swift-metal | vllm-metal (official) |
+| Model | vllm-swift | vllm-metal (official) |
 |-------|:----------------:|:---------------------:|
 | Qwen3-0.6B-4bit | **152.6** | 76.5 |
 | Qwen3-4B-4bit | **114.8** | — |
@@ -50,7 +50,7 @@ DYLD_LIBRARY_PATH=swift/.build/arm64-apple-macosx/debug \
 ## Project Structure
 
 ```
-vllm_swift_metal/           Python plugin (vLLM WorkerBase)
+vllm_swift/           Python plugin (vLLM WorkerBase)
 swift/
   Sources/VLLMBridge/       C bridge (@_cdecl exports)
   bridge.h                  C API (prefill, decode, batched decode)

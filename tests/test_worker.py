@@ -13,7 +13,7 @@ class TestResolveModelPath:
         model_dir.mkdir()
 
         with patch.dict(os.environ, {"HOME": str(tmp_path)}):
-            from vllm_swift_metal.worker import _resolve_model_path
+            from vllm_swift.worker import _resolve_model_path
 
             # Direct path
             assert _resolve_model_path(str(model_dir)) == str(model_dir)
@@ -24,14 +24,14 @@ class TestResolveModelPath:
         model = models_dir / "Qwen3-4B-4bit"
         model.mkdir()
 
-        from vllm_swift_metal.worker import _resolve_model_path
+        from vllm_swift.worker import _resolve_model_path
 
         with patch("os.path.expanduser", side_effect=lambda p: str(tmp_path / p.lstrip("~/"))):
             result = _resolve_model_path("org/Qwen3-4B-4bit")
             assert result == str(model)
 
     def test_fallback_to_raw_name(self):
-        from vllm_swift_metal.worker import _resolve_model_path
+        from vllm_swift.worker import _resolve_model_path
 
         result = _resolve_model_path("/some/direct/path")
         assert result == "/some/direct/path"
@@ -39,7 +39,7 @@ class TestResolveModelPath:
 
 class TestWorkerLifecycle:
     def test_load_model_creates_engine(self):
-        from vllm_swift_metal.worker import SwiftMetalWorker
+        from vllm_swift.worker import SwiftMetalWorker
 
         vllm_config = MagicMock()
         vllm_config.model_config.model = "/tmp/fake-model"
@@ -59,12 +59,12 @@ class TestWorkerLifecycle:
         mock_engine.head_dim = 128
         mock_engine.model_memory_bytes = 4_000_000_000
 
-        with patch("vllm_swift_metal.worker.SwiftInferenceEngine", return_value=mock_engine):
+        with patch("vllm_swift.worker.SwiftInferenceEngine", return_value=mock_engine):
             worker.load_model()
             assert worker.engine is mock_engine
 
     def test_init_device_sets_device(self):
-        from vllm_swift_metal.worker import SwiftMetalWorker
+        from vllm_swift.worker import SwiftMetalWorker
 
         vllm_config = MagicMock()
         vllm_config.model_config.model = "test"
@@ -80,15 +80,15 @@ class TestWorkerLifecycle:
         worker = SwiftMetalWorker(vllm_config=vllm_config)
 
         with (
-            patch("vllm_swift_metal.worker.init_distributed_environment"),
-            patch("vllm_swift_metal.worker.ensure_model_parallel_initialized"),
-            patch("vllm_swift_metal.worker.set_random_seed"),
+            patch("vllm_swift.worker.init_distributed_environment"),
+            patch("vllm_swift.worker.ensure_model_parallel_initialized"),
+            patch("vllm_swift.worker.set_random_seed"),
         ):
             worker.init_device()
             assert worker.device is not None
 
     def test_check_health_passes_with_engine(self):
-        from vllm_swift_metal.worker import SwiftMetalWorker
+        from vllm_swift.worker import SwiftMetalWorker
 
         vllm_config = MagicMock()
         vllm_config.model_config.model = "test"
@@ -108,7 +108,7 @@ class TestWorkerLifecycle:
 
 class TestSwiftMetalWorker:
     def _make_worker(self):
-        from vllm_swift_metal.worker import SwiftMetalWorker
+        from vllm_swift.worker import SwiftMetalWorker
 
         vllm_config = MagicMock()
         vllm_config.model_config.model = "test-model"
@@ -195,7 +195,7 @@ class TestSwiftMetalWorker:
     def test_execute_model_decode_step(self):
         worker = self._make_worker()
         mock_engine = MagicMock()
-        mock_engine.decode_step_req.return_value = 99
+        mock_engine.decode_all.return_value = [("req-001", 99)]
         worker.engine = mock_engine
         worker._active_requests["req-001"] = [42]
         worker._request_params["req-001"] = {"temperature": 0.0, "top_p": 1.0}
@@ -275,7 +275,7 @@ class TestSwiftMetalWorker:
         mock_engine.reset.assert_called_once()
 
     def test_kv_scheme_from_additional_config(self):
-        from vllm_swift_metal.worker import SwiftMetalWorker
+        from vllm_swift.worker import SwiftMetalWorker
 
         vllm_config = MagicMock()
         vllm_config.model_config.model = "test"
@@ -295,7 +295,7 @@ class TestSwiftMetalWorker:
     def test_decode_step_negative_token(self):
         worker = self._make_worker()
         mock_engine = MagicMock()
-        mock_engine.decode_step_req.return_value = -1
+        mock_engine.decode_all.return_value = [("req-eos", -1)]
         worker.engine = mock_engine
         worker._active_requests["req-eos"] = [42]
         worker._request_params["req-eos"] = {}

@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllm-swift-metal"
+name = "vllm-swift"
 version = "0.1.0"
 description = "vLLM Metal plugin powered by mlx-swift — high-performance LLM inference on Apple Silicon"
 requires-python = ">=3.10"
@@ -12,10 +12,10 @@ dependencies = [
 ]
 
 [project.entry-points."vllm.platform_plugins"]
-swift_metal = "vllm_swift_metal:register"
+swift = "vllm_swift:register"
 
 [tool.setuptools.packages.find]
-include = ["vllm_swift_metal*"]
+include = ["vllm_swift*"]
 
 [tool.ruff]
 line-length = 99
@@ -28,7 +28,7 @@ select = ["E", "F", "W", "I"]
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["vllm_swift_metal"]
+source = ["vllm_swift"]
 
 [tool.coverage.report]
 fail_under = 95
