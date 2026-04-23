@@ -152,7 +152,7 @@ def _get_lib():
         ctypes.c_int32,
         ctypes.POINTER(ctypes.c_float),
         ctypes.c_int32,
-        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),
         ctypes.c_int32,
         ctypes.c_float,
         ctypes.c_float,
@@ -257,15 +257,15 @@ class SwiftInferenceEngine:
         req_id: str,
         prompt_tokens: list[int],
         pixels: list[float] | None = None,
-        image_height: int = 0,
-        image_width: int = 0,
+        pixel_shape: list[int] | None = None,
         temperature: float = 0.0,
         top_p: float = 1.0,
     ) -> int:
-        """Prefill with tokens + optional image pixels for VLM models."""
+        """Prefill with tokens + preprocessed pixel tensor for VLM models."""
         arr = (ctypes.c_int32 * len(prompt_tokens))(*prompt_tokens)
-        if pixels:
+        if pixels and pixel_shape:
             pix_arr = (ctypes.c_float * len(pixels))(*pixels)
+            dims_arr = (ctypes.c_int32 * len(pixel_shape))(*pixel_shape)
             return self._lib.vsm_engine_prefill_vlm(
                 self._handle,
                 req_id.encode(),
@@ -273,8 +273,8 @@ class SwiftInferenceEngine:
                 len(prompt_tokens),
                 pix_arr,
                 len(pixels),
-                image_height,
-                image_width,
+                dims_arr,
+                len(pixel_shape),
                 temperature,
                 top_p,
             )

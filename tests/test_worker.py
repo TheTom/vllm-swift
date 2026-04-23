@@ -357,7 +357,7 @@ class TestSwiftMetalWorker:
     def test_execute_model_vlm_prefill(self):
         worker = self._make_worker()
         mock_engine = MagicMock()
-        mock_engine.prefill_req.return_value = 33
+        mock_engine.prefill_vlm.return_value = 33
         mock_engine.decode_all.return_value = []
         worker.engine = mock_engine
 
@@ -368,11 +368,12 @@ class TestSwiftMetalWorker:
         new_req.sampling_params.temperature = 0.0
         new_req.sampling_params.top_p = 1.0
         new_req.sampling_params.logprobs = None
-        # Simulate VLM with pixel_values
+        # Simulate VLM with preprocessed pixel_values
+        import numpy as np
+
+        fake_pixels = np.zeros((1, 3, 4, 4), dtype=np.float32)
         new_req.mm_features = MagicMock()
-        new_req.mm_features.pixel_values = MagicMock()
-        new_req.mm_features.pixel_values.shape = (1, 3, 224, 224)
-        new_req.mm_features.pixel_values.flatten.return_value.tolist.return_value = [0.5] * 150528
+        new_req.mm_features.pixel_values = fake_pixels
 
         cached_data = MagicMock()
         cached_data.req_ids = []
@@ -385,8 +386,7 @@ class TestSwiftMetalWorker:
         assert output is not None
         assert output.req_ids == ["vlm-001"]
         assert output.sampled_token_ids == [[33]]
-        # Falls back to text-only prefill (VLM images not yet supported e2e)
-        mock_engine.prefill_req.assert_called_once()
+        mock_engine.prefill_vlm.assert_called_once()
 
     def test_execute_model_with_logprobs(self):
         worker = self._make_worker()

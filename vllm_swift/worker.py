@@ -234,11 +234,18 @@ class SwiftMetalWorker:
             # vLLM preprocesses images Python-side — mm_features has ready pixels
             mm_features = getattr(new_req, "mm_features", None)
             if mm_features and hasattr(mm_features, "pixel_values"):
-                # TODO: pass preprocessed pixels to Swift via bridge
-                # For now, fall back to text-only (images not yet supported e2e)
-                logger.warning("VLM image input detected but not yet supported")
-                first_token = self.engine.prefill_req(
-                    req_id, prompt_tokens, temperature=temp, top_p=top_p
+                pv = mm_features.pixel_values
+                if hasattr(pv, "numpy"):
+                    pv = pv.numpy()
+                pixel_list = pv.flatten().tolist()
+                pixel_shape = list(pv.shape)
+                first_token = self.engine.prefill_vlm(
+                    req_id,
+                    prompt_tokens,
+                    pixels=pixel_list,
+                    pixel_shape=pixel_shape,
+                    temperature=temp,
+                    top_p=top_p,
                 )
             else:
                 first_token = self.engine.prefill_req(

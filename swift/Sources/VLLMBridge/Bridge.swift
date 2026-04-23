@@ -494,18 +494,19 @@ public func vsm_engine_decode_all(
     }
 }
 
-/// VLM prefill: tokens + image file path.
-/// The Swift side handles model-specific image preprocessing via UserInputProcessor.
+/// VLM prefill: tokens + preprocessed pixel tensor from Python.
+/// Python (vLLM) handles model-specific image preprocessing.
+/// Swift receives ready-to-use pixel data.
 @_cdecl("vsm_engine_prefill_vlm")
 public func vsm_engine_prefill_vlm(
     _ handle: UnsafeMutableRawPointer?,
     reqId: UnsafePointer<CChar>?,
     promptTokens: UnsafePointer<Int32>?,
     numTokens: Int32,
-    imagePath: UnsafePointer<CChar>?,
-    imagePathLen: Int32,
-    _reserved1: Int32,
-    _reserved2: Int32,
+    pixels: UnsafePointer<Float>?,
+    pixelCount: Int32,
+    pixelDims: UnsafePointer<Int32>?,
+    numPixelDims: Int32,
     temperature: Float,
     topP: Float
 ) -> Int32 {
@@ -522,46 +523,32 @@ public func vsm_engine_prefill_vlm(
         params.temperature = temperature
         params.topP = topP
 
-        // Build LMInput — for VLM, load image and create ProcessedImage
+        // Build LMInput with preprocessed pixel data
         let input: LMInput
-        if let imagePath, imagePathLen > 0 {
-            let imgPathStr = String(cString: imagePath)
-            let imgURL = URL(fileURLWithPath: imgPathStr)
+        if let pixels, pixelCount > 0, let pixelDims, numPixelDims > 0 {
+            let pixelData = Array(UnsafeBufferPointer(start: pixels, count: Int(pixelCount)))
+            let shape = (0..<Int(numPixelDims)).map { Int(pixelDims[$0]) }
 
-            // Load image via CIImage → resize → normalize → MLXArray
-            if let ciImage = CIImage(contentsOf: imgURL) {
-                let ctx = CIContext()
-                let extent = ciImage.extent
-                let w = Int(extent.width)
-                let h = Int(extent.height)
+            let pixelArray = MLXArray(pixelData).reshaped(shape)
 
-                // Render to RGBA bitmap
-                var bitmap = [UInt8](repeating: 0, count: w * h * 4)
-                ctx.render(ciImage,
-                           toBitmap: &bitmap, rowBytes: w * 4,
-                           bounds: extent,
-                           format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
-
-                // Convert to float32 [C, H, W], normalized to [0, 1]
-                var pixels = [Float](repeating: 0, count: 3 * h * w)
-                for y in 0..<h {
-                    for x in 0..<w {
-                        let idx = (y * w + x) * 4
-                        pixels[0 * h * w + y * w + x] = Float(bitmap[idx]) / 255.0     // R
-                        pixels[1 * h * w + y * w + x] = Float(bitmap[idx + 1]) / 255.0 // G
-                        pixels[2 * h * w + y * w + x] = Float(bitmap[idx + 2]) / 255.0 // B
-                    }
-                }
-
-                let pixelArray = MLXArray(pixels).reshaped(1, 3, h, w)
-                let processedImage = LMInput.ProcessedImage(
-                    pixels: pixelArray, frames: [THW(1, h, w)]
-                )
-                input = LMInput(text: .init(tokens: tokenArray), image: processedImage)
+            // Extract H, W from shape for THW frames
+            // Shape is typically [N, C, H, W] or [C, H, W]
+            let h: Int
+            let w: Int
+            if shape.count >= 4 {
+                h = shape[shape.count - 2]
+                w = shape[shape.count - 1]
+            } else if shape.count == 3 {
+                h = shape[1]
+                w = shape[2]
             } else {
-                print("[vsm] Failed to load image: \(imgPathStr)")
-                input = LMInput(text: .init(tokens: tokenArray))
+                h = 1; w = pixelData.count
             }
+
+            let processedImage = LMInput.ProcessedImage(
+                pixels: pixelArray, frames: [THW(1, h, w)]
+            )
+            input = LMInput(text: .init(tokens: tokenArray), image: processedImage)
         } else {
             input = LMInput(text: .init(tokens: tokenArray))
         }

@@ -261,9 +261,7 @@ class TestSwiftInferenceEngine:
         engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
         engine._lib = mock_lib
         engine._handle = 0xF00D
-        token = engine.prefill_vlm(
-            "req1", [1, 2], pixels=[0.5] * 12, image_height=2, image_width=2
-        )
+        token = engine.prefill_vlm("req1", [1, 2], pixels=[0.5] * 12, pixel_shape=[1, 3, 2, 2])
         assert token == 77
         mock_lib.vsm_engine_prefill_vlm.assert_called_once()
 
