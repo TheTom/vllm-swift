@@ -40,33 +40,48 @@ logger = init_logger(__name__)
 
 
 def _resolve_model_path(model_name: str) -> str:
-    """Resolve HuggingFace model ID to local path.
+    """Resolve model name to local directory with MLX-format weights.
 
-    Checks ~/models/ first (MLX-format weights), then HF cache.
+    Search order:
+      1. Direct path (if it exists as a directory)
+      2. ~/models/{name} or ~/models/{short_name}
+      3. HuggingFace cache (~/.cache/huggingface/hub)
+      4. Auto-download from HuggingFace Hub
     """
-    # Check ~/models/{model_name} (common for MLX models)
-    local = os.path.expanduser(f"~/models/{model_name}")
-    if os.path.isdir(local):
-        return local
+    if os.path.isdir(model_name):
+        return model_name
 
-    # Check ~/models/ with short name (e.g. "Qwen3-4B-4bit")
+    # ~/models/ with full or short name
     short_name = model_name.split("/")[-1]
-    local_short = os.path.expanduser(f"~/models/{short_name}")
-    if os.path.isdir(local_short):
-        return local_short
+    for candidate in [
+        os.path.expanduser(f"~/models/{model_name}"),
+        os.path.expanduser(f"~/models/{short_name}"),
+    ]:
+        if os.path.isdir(candidate):
+            return candidate
 
-    # Check HF cache
+    # HF cache
     hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
     model_dir = os.path.join(hf_cache, f"models--{model_name.replace('/', '--')}")
     if os.path.isdir(model_dir):
-        # Find latest snapshot
         snapshots = os.path.join(model_dir, "snapshots")
         if os.path.isdir(snapshots):
             snaps = sorted(os.listdir(snapshots))
             if snaps:
                 return os.path.join(snapshots, snaps[-1])
 
-    # Fall back to the raw name (might be a direct path)
+    # Auto-download from HuggingFace Hub
+    try:
+        from huggingface_hub import snapshot_download
+
+        logger.info("Downloading model %s from HuggingFace Hub...", model_name)
+        local_dir = os.path.expanduser(f"~/models/{short_name}")
+        path = snapshot_download(model_name, local_dir=local_dir)
+        logger.info("Downloaded to %s", path)
+        return path
+    except Exception as e:
+        logger.warning("Failed to download %s: %s", model_name, e)
+
     return model_name
 
 
@@ -211,15 +226,19 @@ class SwiftMetalWorker:
         for new_req in scheduler_output.scheduled_new_reqs:
             req_id = new_req.req_id
             prompt_tokens = list(new_req.prompt_token_ids)
-            temp = getattr(new_req.sampling_params, "temperature", 0.0)
-            top_p = getattr(new_req.sampling_params, "top_p", 1.0)
+            sp = new_req.sampling_params
+            temp = getattr(sp, "temperature", 0.0)
+            top_p = getattr(sp, "top_p", 1.0)
 
             first_token = self.engine.prefill_req(
                 req_id, prompt_tokens, temperature=temp, top_p=top_p
             )
 
             self._active_requests[req_id] = [first_token]
-            self._request_params[req_id] = {"temperature": temp, "top_p": top_p}
+            self._request_params[req_id] = {
+                "temperature": temp,
+                "top_p": top_p,
+            }
             req_ids.append(req_id)
             sampled_token_ids.append([first_token])
 

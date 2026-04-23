@@ -211,9 +211,6 @@ class SwiftInferenceEngine:
         for i in range(n):
             rid = req_ids_buf[i].decode() if req_ids_buf[i] else ""
             results.append((rid, int(tokens_buf[i])))
-            # Free the strdup'd string
-            if req_ids_buf[i]:
-                ctypes.cdll.LoadLibrary("libc.dylib").free(req_ids_buf[i])
         return results
 
     def reset(self) -> None:

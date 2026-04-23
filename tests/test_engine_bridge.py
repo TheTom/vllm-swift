@@ -39,8 +39,17 @@ class TestGetLib:
 
         import vllm_swift.engine_bridge as eb
 
-        dylib = os.path.expanduser("~/dev/vllm-swift/swift/libvllm_swift.dylib")
-        if not os.path.exists(dylib):
+        candidates = [
+            os.path.expanduser(
+                "~/dev/vllm-swift/swift/.build/arm64-apple-macosx/release/libVLLMBridge.dylib"
+            ),
+            os.path.expanduser(
+                "~/dev/vllm-swift/swift/.build/arm64-apple-macosx/debug/libVLLMBridge.dylib"
+            ),
+            os.path.expanduser("~/dev/vllm-swift/swift/libvllm_swift.dylib"),
+        ]
+        dylib = next((p for p in candidates if os.path.exists(p)), None)
+        if dylib is None:
             pytest.skip("dylib not built")
         old_lib = eb._lib
         old_path = eb._LIB_PATH
@@ -197,6 +206,27 @@ class TestSwiftInferenceEngine:
         engine._lib = mock_lib
         engine._handle = 0x1234
         assert engine.active_requests() == 5
+
+    def test_decode_all(self):
+        mock_lib = MagicMock()
+
+        def fake_decode_all(handle, req_buf, tok_buf, max_reqs):
+            req_buf[0] = b"r0"
+            req_buf[1] = b"r1"
+            tok_buf[0] = 42
+            tok_buf[1] = 99
+            return 2
+
+        mock_lib.vsm_engine_decode_all.side_effect = fake_decode_all
+
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xDEAD
+
+        results = engine.decode_all(max_reqs=4)
+        assert len(results) == 2
+        assert results[0] == ("r0", 42)
+        assert results[1] == ("r1", 99)
 
     def test_kv_scheme_passed_to_bridge(self):
         mock_lib = MagicMock()

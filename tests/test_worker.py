@@ -36,6 +36,26 @@ class TestResolveModelPath:
         result = _resolve_model_path("/some/direct/path")
         assert result == "/some/direct/path"
 
+    def test_hf_cache_lookup(self, tmp_path):
+        from vllm_swift.worker import _resolve_model_path
+
+        cache_dir = tmp_path / ".cache" / "huggingface" / "hub" / "models--org--model"
+        snap_dir = cache_dir / "snapshots" / "abc123"
+        snap_dir.mkdir(parents=True)
+
+        with patch("os.path.expanduser", side_effect=lambda p: str(tmp_path / p.lstrip("~/"))):
+            result = _resolve_model_path("org/model")
+            assert result == str(snap_dir)
+
+    def test_auto_download_fallback(self):
+        from vllm_swift.worker import _resolve_model_path
+
+        with patch("os.path.expanduser", return_value="/nonexistent"):
+            with patch("os.path.isdir", return_value=False):
+                # Should try to download, fail gracefully, return raw name
+                result = _resolve_model_path("nonexistent/model")
+                assert result == "nonexistent/model"
+
 
 class TestWorkerLifecycle:
     def test_load_model_creates_engine(self):
