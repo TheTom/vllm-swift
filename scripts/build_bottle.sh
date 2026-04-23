@@ -51,7 +51,8 @@ cp "$PROJECT_DIR"/scripts/*.sh "$BOTTLE_DIR/libexec/scripts/" 2>/dev/null || tru
 # Wrapper script
 cat > "$BOTTLE_DIR/bin/vllm-swift" << 'WRAPPER'
 #!/usr/bin/env bash
-PREFIX="$(cd "$(dirname "$0")/.." && pwd)"
+# Resolve symlink to find the real Cellar prefix (where libexec lives)
+PREFIX="$(cd "$(dirname "$0")" && cd "$(dirname "$(readlink "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
 export DYLD_LIBRARY_PATH="$PREFIX/lib:${DYLD_LIBRARY_PATH:-}"
 VENV_DIR="$HOME/.vllm-swift/venv"
 
