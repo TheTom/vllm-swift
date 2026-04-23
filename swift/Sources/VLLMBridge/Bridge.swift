@@ -9,8 +9,16 @@ import MLX
 import MLXNN
 import MLXLMCommon
 @_exported import MLXLLM
+import MLXVLM
 // HuggingFace macros require the full HF SDK. For now, load models
 // from local directories (Python downloads via huggingface_hub first).
+
+/// Wrapper to transfer non-Sendable values across Task boundaries.
+/// Safety: caller ensures no concurrent access.
+struct UnsafeSendable<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
 
 // MARK: - Stub tokenizer (Python handles tokenization)
 
@@ -53,6 +61,7 @@ struct RequestSession {
 final class InferenceEngine {
     let model: any LanguageModel
     let tokenizer: any Tokenizer
+    let processor: (any UserInputProcessor)?
     let configuration: ModelConfiguration
 
     /// Active sessions keyed by request ID (supports concurrent requests)
@@ -76,11 +85,13 @@ final class InferenceEngine {
     init(
         model: any LanguageModel,
         tokenizer: any Tokenizer,
+        processor: (any UserInputProcessor)? = nil,
         configuration: ModelConfiguration,
         params: GenerateParameters
     ) {
         self.model = model
         self.tokenizer = tokenizer
+        self.processor = processor
         self.configuration = configuration
         self.generateParams = params
     }
@@ -138,11 +149,22 @@ public func vsm_engine_create(
             // Load model from local directory. Python downloads via
             // huggingface_hub and passes the cache path.
             let modelURL = URL(fileURLWithPath: modelId)
-            let context = try await loadModel(
-                from: modelURL,
-                using: StubTokenizerLoader()
-            )
-            loadedContext = context
+            // Try LLM first, then VLM
+            do {
+                let context = try await loadModel(
+                    from: modelURL,
+                    using: StubTokenizerLoader()
+                )
+                loadedContext = context
+            } catch {
+                // LLM failed — try VLM
+                print("[vsm] LLM load failed, trying VLM: \(error.localizedDescription)")
+                let vlmContext = try await MLXVLM.VLMModelFactory.shared.load(
+                    from: modelURL,
+                    using: StubTokenizerLoader()
+                )
+                loadedContext = vlmContext
+            }
         } catch {
             loadError = error
         }
@@ -159,6 +181,7 @@ public func vsm_engine_create(
     let engine = InferenceEngine(
         model: context.model,
         tokenizer: context.tokenizer,
+        processor: context.processor,
         configuration: ModelConfiguration(id: modelId),
         params: params
     )
@@ -470,22 +493,48 @@ public func vsm_engine_decode_all(
     }
 }
 
-/// VLM prefill: tokens + image pixels
+/// VLM prefill: tokens + image file path.
+/// The Swift side handles model-specific image preprocessing via UserInputProcessor.
 @_cdecl("vsm_engine_prefill_vlm")
 public func vsm_engine_prefill_vlm(
     _ handle: UnsafeMutableRawPointer?,
     reqId: UnsafePointer<CChar>?,
     promptTokens: UnsafePointer<Int32>?,
     numTokens: Int32,
-    pixels: UnsafePointer<Float>?,
-    pixelCount: Int32,
-    imageHeight: Int32,
-    imageWidth: Int32,
+    imagePath: UnsafePointer<CChar>?,
+    imagePathLen: Int32,
+    _reserved1: Int32,
+    _reserved2: Int32,
     temperature: Float,
     topP: Float
 ) -> Int32 {
     guard let handle, let promptTokens, let reqId else { return -1 }
     let rid = String(cString: reqId)
+
+    // Pre-process image outside the engine lock (async-safe)
+    var preprocessedInput: LMInput?
+    if let imagePath, imagePathLen > 0 {
+        let imgPathStr = String(cString: imagePath)
+        if let engine = engineQueue.sync(execute: { engines[handle] }),
+           let proc = engine.processor
+        {
+            let imgURL = URL(fileURLWithPath: imgPathStr)
+            let userInput = UserInput(
+                prompt: .text(""),
+                images: [.url(imgURL)]
+            )
+            nonisolated(unsafe) var result: LMInput?
+            let sem = DispatchSemaphore(value: 0)
+            let box = UnsafeSendable(proc)
+            let inputBox = UnsafeSendable(userInput)
+            Task { @Sendable in
+                result = try? await box.value.prepare(input: inputBox.value)
+                sem.signal()
+            }
+            sem.wait()
+            preprocessedInput = result
+        }
+    }
 
     return engineQueue.sync {
         guard let engine = engines[handle] else { return Int32(-1) }
@@ -497,25 +546,7 @@ public func vsm_engine_prefill_vlm(
         params.temperature = temperature
         params.topP = topP
 
-        // Build LMInput with image if provided
-        let input: LMInput
-        if let pixels, pixelCount > 0 {
-            let pixelData = Array(UnsafeBufferPointer(start: pixels, count: Int(pixelCount)))
-            let channels = 3
-            let h = Int(imageHeight)
-            let w = Int(imageWidth)
-            let pixelArray = MLXArray(pixelData).reshaped(1, channels, h, w)
-            let processedImage = LMInput.ProcessedImage(
-                pixels: pixelArray,
-                frames: [THW(1, h, w)]
-            )
-            input = LMInput(
-                text: .init(tokens: tokenArray),
-                image: processedImage
-            )
-        } else {
-            input = LMInput(text: .init(tokens: tokenArray))
-        }
+        let input = preprocessedInput ?? LMInput(text: .init(tokens: tokenArray))
 
         do {
             var iterator = try TokenIterator(

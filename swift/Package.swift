@@ -22,6 +22,7 @@ let package = Package(
             dependencies: [
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXVLM", package: "mlx-swift-lm"),
             ],
             path: "Sources/VLLMBridge",
             swiftSettings: [
