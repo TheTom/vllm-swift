@@ -238,6 +238,25 @@ DYLD_LIBRARY_PATH=swift/.build/arm64-apple-macosx/release \
   vllm serve ~/models/Qwen3-4B-4bit --max-model-len 4096
 ```
 
+### Troubleshooting
+
+**Homebrew checksum error on reinstall:**
+```bash
+brew uninstall vllm-swift && brew untap TheTom/tap
+rm -rf $(brew --cache)/downloads/*vllm*
+brew tap TheTom/tap && brew install vllm-swift
+```
+
+**"No module named vllm" after brew install:**
+```bash
+rm -rf ~/.vllm-swift/venv
+vllm-swift setup
+```
+
+**vLLM build error (Apple Clang parentheses):** Our install script handles this automatically. If you're installing vLLM manually, pass `CFLAGS="-Wno-parentheses" pip install vllm`.
+
+**activate.sh not found:** Make sure you run `./install.sh` (or `./scripts/install.sh`) first — it generates `activate.sh` in the project root.
+
 ### Download a model
 
 ```bash
