@@ -6,14 +6,13 @@ Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference
 
 ```bash
 brew tap TheTom/tap && brew install vllm-swift
-
-python3 -m venv .venv && source .venv/bin/activate
-pip install vllm
-vllm-swift setup
+vllm-swift download mlx-community/Qwen3-0.6B-4bit
 vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
 ```
 
-Or from source:
+That's it. `brew install` handles the Swift build, Python venv, vLLM, and plugin — no manual setup.
+
+From source:
 
 ```bash
 git clone https://github.com/TheTom/vllm-swift.git && cd vllm-swift
@@ -50,23 +49,15 @@ All numbers measured on the same hardware with release builds. Decode output tok
 
 All numbers from mlx-swift-lm on M5 Max. Same model code used by vllm-swift.
 
-**Qwen3.5 9B (4-bit weights)**
-
-| KV Cache | Compression | PPL @1K | PPL @32K | Decode @1K | Decode @32K |
-|----------|:-----------:|:------:|:-------:|:----------:|:-----------:|
-| FP16 | 1.0x | 1.87 | 2.25 | 91 tok/s | 80 tok/s |
-| turbo4v2 | 3.2x | — | — | — | — |
-| turbo3 | 4.6x | 1.96 | 2.12 | 94 tok/s | 79 tok/s |
-
 **Qwen3.5 2B (4-bit weights)**
 
-| KV Cache | Compression | PPL @1K | PPL @32K | Decode @1K | Decode @32K |
-|----------|:-----------:|:------:|:-------:|:----------:|:-----------:|
-| FP16 | 1.0x | 2.72 | 4.40 | 264 tok/s | 157 tok/s |
-| turbo4v2 | 3.2x | 3.22 | 3.72 | 265 tok/s | 157 tok/s |
-| turbo3 | 4.6x | 3.95 | 3.89 | 264 tok/s | 157 tok/s |
+| KV Cache | Compression | PPL @1K | PPL @32K | Prefill @1K | Prefill @32K | Decode @1K | Decode @32K |
+|----------|:-----------:|:------:|:-------:|:----------:|:-----------:|:----------:|:-----------:|
+| FP16 | 1.0x | 2.72 | 4.40 | 11,173 tok/s | 6,903 tok/s | 264 tok/s | 157 tok/s |
+| turbo4v2 | 3.2x | 3.22 | 3.72 | 11,298 tok/s | 6,916 tok/s | 265 tok/s | 157 tok/s |
+| turbo3 | 4.6x | 3.95 | 3.89 | 11,348 tok/s | 6,958 tok/s | 264 tok/s | 157 tok/s |
 
-TurboQuant+ compresses KV cache 3-5x with negligible PPL impact. Decode speed is unchanged — compression is free during memory-bound decode.
+TurboQuant+ compresses KV cache 3-5x with negligible quality impact. Prefill and decode speed are unchanged — compression is free. The 157 tok/s flat across configs at 32K is expected: decode at this model size is bottlenecked by model weight reads, not KV cache.
 
 ## Architecture
 
@@ -110,17 +101,16 @@ Metal GPU
 ```bash
 brew tap TheTom/tap
 brew install vllm-swift
+```
 
-# Set up Python environment (one time)
-python3 -m venv .venv && source .venv/bin/activate
-pip install vllm
-vllm-swift setup
+That's it. The formula builds the Swift bridge, creates a managed Python venv, installs vLLM and the plugin. Then:
 
-# Serve a model
+```bash
+vllm-swift download mlx-community/Qwen3-0.6B-4bit
 vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
 ```
 
-The `vllm-swift` command handles `DYLD_LIBRARY_PATH` automatically — no env vars to manage.
+No `DYLD_LIBRARY_PATH`, no `source activate`, no `pip install`. Just `vllm-swift serve`.
 
 ### From source
 

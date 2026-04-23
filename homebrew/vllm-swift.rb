@@ -4,9 +4,8 @@
 # Install: brew install TheTom/tap/vllm-swift
 # Or:      brew tap TheTom/tap && brew install vllm-swift
 #
-# This formula builds the Swift/Metal bridge dylib and installs a
-# wrapper script. The Python vLLM plugin is installed separately
-# via pip (Homebrew doesn't manage Python venvs well).
+# After install, just run: vllm-swift serve <model>
+# Everything (dylib, venv, vLLM, plugin) is handled automatically.
 
 class VllmSwift < Formula
   desc "Native Swift/Metal backend for vLLM on Apple Silicon"
@@ -16,6 +15,7 @@ class VllmSwift < Formula
   license "Apache-2.0"
 
   depends_on xcode: ["15.0", :build]
+  depends_on "python@3.12"
   depends_on :macos
   depends_on arch: :arm64
 
@@ -34,66 +34,82 @@ class VllmSwift < Formula
     metallib = "#{build_dir}/mlx.metallib"
     lib.install metallib if File.exist?(metallib)
 
-    # Install the Python plugin source
-    (libexec/"vllm_swift").install Dir["vllm_swift/*.py"]
+    # Install the Python plugin source + pyproject.toml
     libexec.install "pyproject.toml"
+    (libexec/"vllm_swift").install Dir["vllm_swift/*.py"]
 
     # Install scripts
     (libexec/"scripts").install Dir["scripts/*"]
 
-    # Create wrapper script that sets DYLD_LIBRARY_PATH automatically
+    # Create managed venv with vLLM + plugin pre-installed
+    venv_dir = libexec/"venv"
+    system "python3", "-m", "venv", venv_dir
+    venv_pip = venv_dir/"bin/pip"
+    venv_python = venv_dir/"bin/python3"
+
+    # Install torch (CPU wheel — Metal acceleration comes from Swift side)
+    system venv_pip, "install", "-q",
+           "torch", "--index-url", "https://download.pytorch.org/whl/cpu"
+
+    # Install vLLM
+    system venv_pip, "install", "-q", "vllm>=0.19.0"
+
+    # Install the plugin
+    system venv_pip, "install", "-q", "-e", libexec
+
+    # Create wrapper that uses the managed venv
     (bin/"vllm-swift").write <<~EOS
       #!/usr/bin/env bash
-      # vllm-swift wrapper — sets up dylib path and runs vllm serve
+      # vllm-swift — Native Swift/Metal LLM inference
       #
-      # Usage: vllm-swift serve <model> [args...]
-      #        vllm-swift setup   — install Python plugin into current venv
-      #        vllm-swift test    — run integration test
+      # Usage:
+      #   vllm-swift serve <model> [vllm args...]
+      #   vllm-swift download <hf-model-id>
+      #   vllm-swift test [model_path]
+      #   vllm-swift version
 
       export DYLD_LIBRARY_PATH="#{lib}:${DYLD_LIBRARY_PATH:-}"
+      VENV_PYTHON="#{venv_dir}/bin/python3"
 
       case "${1:-}" in
-        setup)
-          echo "Installing vllm-swift Python plugin..."
-          if [ -z "${VIRTUAL_ENV:-}" ]; then
-            echo "WARNING: No active virtualenv. Consider: python3 -m venv .venv && source .venv/bin/activate"
-          fi
-          pip install -e "#{libexec}" 2>&1
-          echo ""
-          echo "Done. Run: vllm-swift serve <model_path>"
+        serve)
+          shift
+          exec "$VENV_PYTHON" -m vllm.entrypoints.openai.api_server "$@"
+          ;;
+        download)
+          shift
+          MODEL="${1:?Usage: vllm-swift download <model-id>}"
+          SHORT="$(basename "$MODEL")"
+          echo "Downloading $MODEL to ~/models/$SHORT..."
+          exec "$VENV_PYTHON" -c "
+      from huggingface_hub import snapshot_download
+      import os
+      path = snapshot_download('$MODEL', local_dir=os.path.expanduser('~/models/$SHORT'))
+      print(f'Downloaded to {path}')
+      "
           ;;
         test)
           shift
           exec "#{libexec}/scripts/integration_test.sh" "$@"
           ;;
-        serve)
-          shift
-          exec python3 -m vllm.entrypoints.openai.api_server "$@"
-          ;;
-        completions|chat)
-          # Pass through to vllm CLI
-          exec python3 -m vllm.entrypoints.openai.api_server "$@"
+        version)
+          echo "vllm-swift 0.1.0"
+          echo "dylib: #{lib}/libVLLMBridge.dylib"
+          "$VENV_PYTHON" -c "import vllm; print(f'vLLM: {vllm.__version__}')" 2>/dev/null || true
           ;;
         *)
-          if [ $# -eq 0 ]; then
-            echo "vllm-swift — Native Swift/Metal backend for vLLM"
-            echo ""
-            echo "Usage:"
-            echo "  vllm-swift setup              Install Python plugin into current venv"
-            echo "  vllm-swift serve <model> ...   Start OpenAI-compatible API server"
-            echo "  vllm-swift test [model]        Run integration test"
-            echo ""
-            echo "First time setup:"
-            echo "  python3 -m venv .venv && source .venv/bin/activate"
-            echo "  pip install vllm"
-            echo "  vllm-swift setup"
-            echo "  vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048"
-            echo ""
-            echo "dylib: #{lib}/libVLLMBridge.dylib"
-          else
-            # Unknown command — pass everything to vllm
-            exec python3 -m vllm.entrypoints.openai.api_server "$@"
-          fi
+          echo "vllm-swift — Native Swift/Metal backend for vLLM on Apple Silicon"
+          echo ""
+          echo "Usage:"
+          echo "  vllm-swift serve <model> [args]   Start OpenAI-compatible API server"
+          echo "  vllm-swift download <model-id>    Download model from HuggingFace"
+          echo "  vllm-swift test [model_path]      Run integration test"
+          echo "  vllm-swift version                Show version info"
+          echo ""
+          echo "Examples:"
+          echo "  vllm-swift download mlx-community/Qwen3-0.6B-4bit"
+          echo "  vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048"
+          echo "  vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 4096 --port 8080"
           ;;
       esac
     EOS
@@ -101,26 +117,19 @@ class VllmSwift < Formula
 
   def caveats
     <<~EOS
-      vllm-swift requires a Python virtualenv with vLLM installed.
+      vllm-swift is ready to use. No additional setup needed.
 
-      First time setup:
-        python3 -m venv .venv
-        source .venv/bin/activate
-        pip install vllm
-        vllm-swift setup
-
-      Then serve a model:
+      Download a model and serve:
+        vllm-swift download mlx-community/Qwen3-0.6B-4bit
         vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
 
-      Models can be downloaded from HuggingFace:
-        huggingface-cli download mlx-community/Qwen3-0.6B-4bit --local-dir ~/models/Qwen3-0.6B-4bit
+      The server exposes an OpenAI-compatible API at http://localhost:8000
     EOS
   end
 
   test do
-    # Verify dylib loads
     assert_predicate lib/"libVLLMBridge.dylib", :exist?
-    # Verify wrapper works
     assert_match "vllm-swift", shell_output("#{bin}/vllm-swift")
+    assert_match "0.1.0", shell_output("#{bin}/vllm-swift version")
   end
 end
