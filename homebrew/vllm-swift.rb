@@ -19,6 +19,11 @@ class VllmSwift < Formula
   depends_on :macos
   depends_on arch: :arm64
 
+  # Swift Package Manager needs network + filesystem access during build.
+  # Homebrew's sandbox blocks this — users must install with:
+  #   HOMEBREW_NO_SANDBOX=1 brew install vllm-swift
+  # or use the from-source install instead.
+
   def install
     # Build Swift bridge (release)
     cd "swift" do

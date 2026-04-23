@@ -9,20 +9,17 @@
 ## Quick Start
 
 ```bash
-brew tap TheTom/tap && brew install vllm-swift
-vllm-swift download mlx-community/Qwen3-4B-4bit
-vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048
-```
-
-That's it. `brew install` handles the Swift build, Python venv, vLLM, and plugin — no manual setup.
-
-From source:
-
-```bash
 git clone https://github.com/TheTom/vllm-swift.git && cd vllm-swift
 ./scripts/install.sh
 source activate.sh
 vllm serve ~/models/Qwen3-4B-4bit --max-model-len 2048
+```
+
+For long context, enable TurboQuant+ KV cache compression (3-5x memory savings, no speed penalty):
+
+```bash
+vllm serve ~/models/Qwen3-4B-4bit --max-model-len 32768 \
+  --additional-config '{"kv_scheme": "turbo3", "kv_bits": 3}'
 ```
 
 ## Performance (M5 Max 128GB)
@@ -79,42 +76,57 @@ Metal GPU
 - Streaming (SSE) responses
 - Chat templates (applied by vLLM, model-specific)
 - Batched concurrent decode with `BatchedKVCache` (fully batched projections + attention)
-- Dynamic request add/remove without full batch reinit
 - Per-request temperature sampling in batched path
 - Auto model download from HuggingFace Hub
 - TurboQuant+ KV cache compression (`turbo3`, `turbo4v2`) via mlx-swift-lm
-- VLM (vision-language model) support with preprocessed pixel passthrough
 - Decode logprobs (log-probability of sampled tokens)
 - Greedy and temperature sampling
 - EOS / stop token detection (vLLM scheduler)
+- VLM (vision-language model) support (experimental)
+
+## Configuration
+
+### TurboQuant+ KV Cache Compression
+
+Enable KV cache compression to reduce memory usage 3-5x with minimal quality loss:
+
+```bash
+vllm-swift serve ~/models/Qwen3-4B-4bit \
+  --max-model-len 32768 \
+  --additional-config '{"kv_scheme": "turbo3", "kv_bits": 3}'
+```
+
+| Scheme | Compression | Best for |
+|--------|:-----------:|----------|
+| `turbo3` | 4.6x | Maximum compression, long context |
+| `turbo4v2` | 3.2x | Balanced quality/compression |
+
+### Common flags
+
+```bash
+vllm-swift serve <model> [options]
+
+  --max-model-len N          Max sequence length (default: model config)
+  --port PORT                API server port (default: 8000)
+  --gpu-memory-utilization F Memory fraction 0.0-1.0 (default: 0.9)
+  --dtype float16            Model dtype (default: float16)
+  --additional-config JSON   Extra config (kv_scheme, kv_bits)
+```
+
+All standard `vllm serve` flags work — vllm-swift is a drop-in backend.
 
 ## Known Limitations
 
 - **Prompt logprobs** not yet supported (decode logprobs work)
 - **LoRA** not supported (Swift engine limitation)
 - **Chunked prefill** disabled (Swift engine handles full sequences)
-- Only **Qwen3** models use the fully batched decode path; other models fall back to semi-batched or sequential
+- **top_p sampling** not supported in batched decode path (temperature works)
+- Only **Qwen3** models use the fully batched decode path; other architectures fall back to sequential decode (still functional, just slower at high concurrency)
 - Requires macOS on Apple Silicon (no Linux/CUDA)
 
 ## Install
 
-### Homebrew (recommended)
-
-```bash
-brew tap TheTom/tap
-brew install vllm-swift
-```
-
-That's it. The formula builds the Swift bridge, creates a managed Python venv, installs vLLM and the plugin. Then:
-
-```bash
-vllm-swift download mlx-community/Qwen3-4B-4bit
-vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048
-```
-
-No `DYLD_LIBRARY_PATH`, no `source activate`, no `pip install`. Just `vllm-swift serve`.
-
-### From source
+### From source (recommended)
 
 ```bash
 git clone https://github.com/TheTom/vllm-swift.git
