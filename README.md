@@ -131,13 +131,42 @@ Metal GPU
 
 ## Configuration
 
-### [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV Cache Compression
+`vllm-swift serve` is a thin wrapper around `vllm serve` — all standard vLLM flags work. Here are the common setups:
 
-Compress KV cache 3-5x to fit longer context with minimal quality loss:
+### Basic serving
 
 ```bash
 vllm-swift serve ~/models/Qwen3-4B-4bit \
-  --max-model-len 32768 \
+  --served-model-name qwen3-4b \
+  --max-model-len 40960
+```
+
+### Agent / tool calling (Hermes, OpenCode, etc.)
+
+```bash
+vllm-swift serve ~/models/Qwen3-4B-4bit \
+  --served-model-name qwen3-4b \
+  --max-model-len 40960 \
+  --enable-auto-tool-choice --tool-call-parser hermes
+```
+
+### Chain-of-thought models (strip `<think>` tags)
+
+```bash
+vllm-swift serve ~/models/Qwen3-4B-4bit \
+  --served-model-name qwen3-4b \
+  --max-model-len 40960 \
+  --enable-reasoning --reasoning-parser deepseek_r1
+```
+
+### Long context with [TurboQuant+](https://github.com/TheTom/turboquant_plus)
+
+Compress KV cache 3-5x to fit longer context with no measurable impact on throughput:
+
+```bash
+vllm-swift serve ~/models/Qwen3-4B-4bit \
+  --served-model-name qwen3-4b \
+  --max-model-len 40960 \
   --additional-config '{"kv_scheme": "turbo3", "kv_bits": 3}'
 ```
 
@@ -146,17 +175,35 @@ vllm-swift serve ~/models/Qwen3-4B-4bit \
 | `turbo3` | 4.6x | Maximum compression, long context |
 | `turbo4v2` | 3.2x | Balanced quality/compression |
 
-### Common flags
+### Kitchen sink (agent + reasoning + TurboQuant+)
+
+```bash
+vllm-swift serve ~/models/Qwen3-4B-4bit \
+  --served-model-name qwen3-4b \
+  --max-model-len 40960 \
+  --enable-auto-tool-choice --tool-call-parser hermes \
+  --enable-reasoning --reasoning-parser deepseek_r1 \
+  --additional-config '{"kv_scheme": "turbo3", "kv_bits": 3}'
+```
+
+### All flags
 
 ```bash
 vllm-swift serve <model> [options]
 
+  --served-model-name NAME   Clean model name for API clients (recommended)
   --max-model-len N          Max sequence length (default: model config)
   --port PORT                API server port (default: 8000)
   --gpu-memory-utilization F Memory fraction 0.0-1.0 (default: 0.9)
   --dtype float16            Model dtype (default: float16)
+  --enable-auto-tool-choice  Enable tool/function calling
+  --tool-call-parser NAME    Tool call format (hermes, llama3, mistral, etc.)
+  --enable-reasoning         Enable chain-of-thought parsing
+  --reasoning-parser NAME    Reasoning format (deepseek_r1, etc.)
   --additional-config JSON   Extra config (kv_scheme, kv_bits)
 ```
+
+All standard [vLLM flags](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html) work — these are just the most common ones.
 
 ## Known Limitations (early development)
 
