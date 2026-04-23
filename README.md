@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  A native Swift/Metal backend for vLLM that removes Python from the inference hot path<br>
-  and scales efficiently with concurrency.
+  A native Swift/Metal backend for vLLM on Apple Silicon.<br>
+  <b>No Python in the inference hot path.</b>
 </p>
 
 ## Quick Start
@@ -42,7 +42,10 @@ vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 32768 \
 
 Decode output tok/s. Prompt=18 tokens, generation=50 tokens, greedy decode.
 
-> **Bridge direct** = raw Swift/Metal engine (no vLLM scheduler). **vllm serve** = full API server with scheduling and HTTP overhead.
+> **Bridge direct** = raw Swift/Metal engine (no vLLM scheduler)
+> **vllm serve** = full API server (scheduling + HTTP overhead)
+
+Throughput improves most at low concurrency where per-step Python overhead dominates, and converges at high batch sizes where GPU compute takes over.
 
 ### Qwen3-0.6B
 
