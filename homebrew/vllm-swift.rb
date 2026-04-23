@@ -107,8 +107,8 @@ class VllmSwift < Formula
           echo "  vllm-swift version                Show version info"
           echo ""
           echo "Examples:"
-          echo "  vllm-swift download mlx-community/Qwen3-0.6B-4bit"
-          echo "  vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048"
+          echo "  vllm-swift download mlx-community/Qwen3-4B-4bit"
+          echo "  vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048"
           echo "  vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 4096 --port 8080"
           ;;
       esac
@@ -120,8 +120,8 @@ class VllmSwift < Formula
       vllm-swift is ready to use. No additional setup needed.
 
       Download a model and serve:
-        vllm-swift download mlx-community/Qwen3-0.6B-4bit
-        vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+        vllm-swift download mlx-community/Qwen3-4B-4bit
+        vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048
 
       The server exposes an OpenAI-compatible API at http://localhost:8000
     EOS

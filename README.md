@@ -6,8 +6,8 @@ Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference
 
 ```bash
 brew tap TheTom/tap && brew install vllm-swift
-vllm-swift download mlx-community/Qwen3-0.6B-4bit
-vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+vllm-swift download mlx-community/Qwen3-4B-4bit
+vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048
 ```
 
 That's it. `brew install` handles the Swift build, Python venv, vLLM, and plugin — no manual setup.
@@ -18,7 +18,7 @@ From source:
 git clone https://github.com/TheTom/vllm-swift.git && cd vllm-swift
 ./scripts/install.sh
 source activate.sh
-vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+vllm serve ~/models/Qwen3-4B-4bit --max-model-len 2048
 ```
 
 ## Performance (M5 Max 128GB)
@@ -106,8 +106,8 @@ brew install vllm-swift
 That's it. The formula builds the Swift bridge, creates a managed Python venv, installs vLLM and the plugin. Then:
 
 ```bash
-vllm-swift download mlx-community/Qwen3-0.6B-4bit
-vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+vllm-swift download mlx-community/Qwen3-4B-4bit
+vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048
 ```
 
 No `DYLD_LIBRARY_PATH`, no `source activate`, no `pip install`. Just `vllm-swift serve`.
@@ -123,7 +123,7 @@ cd vllm-swift
 
 # Activate and serve
 source activate.sh
-vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+vllm serve ~/models/Qwen3-4B-4bit --max-model-len 2048
 ```
 
 ### Manual (full control)
@@ -140,17 +140,17 @@ pip install -e .
 
 # Set library path and run
 DYLD_LIBRARY_PATH=swift/.build/arm64-apple-macosx/release \
-  vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+  vllm serve ~/models/Qwen3-4B-4bit --max-model-len 2048
 ```
 
 ### Download a model
 
 ```bash
 # MLX-format models from HuggingFace
-huggingface-cli download mlx-community/Qwen3-0.6B-4bit --local-dir ~/models/Qwen3-0.6B-4bit
+huggingface-cli download mlx-community/Qwen3-4B-4bit --local-dir ~/models/Qwen3-4B-4bit
 
 # Or vllm-swift will auto-download if huggingface_hub is installed
-vllm-swift serve mlx-community/Qwen3-0.6B-4bit --max-model-len 2048
+vllm-swift serve mlx-community/Qwen3-4B-4bit --max-model-len 2048
 ```
 
 ## Project Structure
