@@ -31,19 +31,17 @@ All numbers measured on the same hardware with release builds. Decode output tok
 
 | | Single | 8 concurrent | 32 concurrent | 64 concurrent |
 |---|:---:|:---:|:---:|:---:|
-| **vllm-swift** (bridge direct) | **575.8** | **1,567** | **2,922** | **3,408** |
-| vllm-metal (Python/MLX) | 78.3 | 788.5 | 2,367 | — |
+| **vllm-swift** (bridge direct) | **340** | **1,512** | **2,862** | **3,383** |
+| vllm-metal (Python/MLX) | 142 | 1,170 | 2,457 | 3,017 |
 
 ### Qwen3-4B
 
 | | Single | 8 concurrent | 32 concurrent | 64 concurrent |
 |---|:---:|:---:|:---:|:---:|
-| **vllm-swift** (bridge direct) | **178.8** | **482.2** | **1,207** | **1,533** |
-| vllm-metal (Python/MLX) | 5.3* | — | — | — |
+| **vllm-swift** (bridge direct) | **149** | **479** | **1,166** | **1,519** |
+| vllm-metal (Python/MLX) | 105 | 408 | 1,067 | 1,387 |
 
-\*vllm-metal 7B number shown (no 4B test available).
-
-**Why the speed difference?** Python/MLX has ~197ms `async_eval` overhead per decode step. The Swift bridge eliminates this by keeping the entire forward pass in compiled Swift/Metal — no Python in the GPU hot path.
+**Why the speed difference?** The Swift bridge keeps the entire forward pass in compiled Swift/Metal — no Python in the GPU hot path. The gap is largest at low concurrency (2.4x single-request on 0.6B) where per-step overhead dominates, and narrows at high batch sizes where GPU compute becomes the bottleneck.
 
 ### TurboQuant+ KV Cache Compression
 
