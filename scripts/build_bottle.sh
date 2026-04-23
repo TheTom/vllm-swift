@@ -70,25 +70,29 @@ _find_python() {
 }
 
 _ensure_venv() {
-  if [ ! -d "$VENV_DIR" ]; then
-    PYTHON=$(_find_python)
-    if [ -z "$PYTHON" ]; then
-      echo "ERROR: Python 3.10+ required. Install via:"
-      echo "  brew install python@3.12"
-      echo "  or: https://www.python.org/downloads/"
-      exit 1
-    fi
-    echo "Setting up vllm-swift Python environment (one time)..."
-    echo "Using: $PYTHON ($($PYTHON --version 2>&1))"
-    "$PYTHON" -m venv "$VENV_DIR"
-    "$VENV_DIR/bin/pip" install -q torch --index-url https://download.pytorch.org/whl/cpu
-    "$VENV_DIR/bin/pip" install -q "vllm>=0.19.0"
-    # Install plugin — use editable if pyproject.toml exists, otherwise just add to path
-    if [ -f "$PREFIX/libexec/pyproject.toml" ]; then
-      cd "$PREFIX/libexec" && "$VENV_DIR/bin/pip" install -q . && cd -
-    fi
-    echo "Setup complete."
+  # Check if vLLM is actually working, not just if the dir exists
+  if "$VENV_DIR/bin/python3" -c "import vllm" 2>/dev/null; then
+    return
   fi
+  PYTHON=$(_find_python)
+  if [ -z "$PYTHON" ]; then
+    echo "ERROR: Python 3.10-3.13 required (vLLM doesn't support 3.14+ yet)."
+    echo "  Install via: brew install python@3.13"
+    echo "  or: https://www.python.org/downloads/"
+    exit 1
+  fi
+  echo "Setting up vllm-swift Python environment (one time)..."
+  echo "Using: $PYTHON ($($PYTHON --version 2>&1))"
+  if [ ! -d "$VENV_DIR" ]; then
+    "$PYTHON" -m venv "$VENV_DIR"
+  fi
+  "$VENV_DIR/bin/pip" install -q torch --index-url https://download.pytorch.org/whl/cpu
+  CFLAGS="-Wno-parentheses" "$VENV_DIR/bin/pip" install "vllm>=0.19.0" 2>&1 | tail -5
+  # Install plugin
+  if [ -f "$PREFIX/libexec/pyproject.toml" ]; then
+    cd "$PREFIX/libexec" && "$VENV_DIR/bin/pip" install -q . && cd - >/dev/null
+  fi
+  echo "Setup complete."
 }
 
 case "${1:-}" in
