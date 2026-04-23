@@ -134,6 +134,27 @@ const float* vsm_engine_get_logits(
     int32_t* out_vocab_size     // receives vocab size
 );
 
+// Initialize batched KV cache from all active per-request caches.
+// Must be called after prefill_req and before decode_all for batched path.
+// Returns number of batched requests, or -1 if model doesn't support it.
+int32_t vsm_engine_init_batched(vsm_engine_t engine);
+
+// Add a single request to the batched KV cache (incremental, no full reinit).
+// Must be called after prefill_req for this request.
+// Returns slot index, or -1 on failure.
+int32_t vsm_engine_add_batch_slot(
+    vsm_engine_t engine,
+    const char* req_id
+);
+
+// Remove a request from the batched KV cache.
+// Swaps last slot into removed slot for dense packing.
+// Returns 0 on success, -1 on failure.
+int32_t vsm_engine_remove_batch_slot(
+    vsm_engine_t engine,
+    const char* req_id
+);
+
 // Reset KV cache (new conversation)
 void vsm_engine_reset(vsm_engine_t engine);
 

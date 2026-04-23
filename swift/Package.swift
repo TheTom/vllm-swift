@@ -12,9 +12,9 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // Dev: local path for fast iteration (no network fetches)
-        // Release: swap to .package(url: "https://github.com/ekryski/mlx-swift-lm.git", branch: "ek/tom-eric-moe-tuning")
-        .package(path: "/Users/tom/dev/mlx-swift-lm"),
+        // Pinned snapshot of alpha branch with BatchedKVCache + TurboQuant+
+        // For local dev: swap to .package(path: "/Users/tom/dev/mlx-swift-lm")
+        .package(url: "https://github.com/TheTom/mlx-swift-lm.git", branch: "vllm-swift-stable"),
     ],
     targets: [
         .target(

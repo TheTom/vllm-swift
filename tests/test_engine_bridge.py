@@ -265,6 +265,33 @@ class TestSwiftInferenceEngine:
         assert token == 77
         mock_lib.vsm_engine_prefill_vlm.assert_called_once()
 
+    def test_init_batched(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_init_batched.return_value = 4
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xBA7C4
+        assert engine.init_batched() == 4
+        mock_lib.vsm_engine_init_batched.assert_called_once_with(0xBA7C4)
+
+    def test_add_batch_slot(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_add_batch_slot.return_value = 2
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xADD
+        assert engine.add_batch_slot("req-3") == 2
+        mock_lib.vsm_engine_add_batch_slot.assert_called_once()
+
+    def test_remove_batch_slot(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_remove_batch_slot.return_value = 0
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0xDE1
+        assert engine.remove_batch_slot("req-1") == 0
+        mock_lib.vsm_engine_remove_batch_slot.assert_called_once()
+
     def test_kv_scheme_passed_to_bridge(self):
         mock_lib = MagicMock()
         mock_lib.vsm_engine_create.return_value = 0x1

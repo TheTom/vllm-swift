@@ -4,23 +4,27 @@ Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference
 
 ## Performance (M5 Max 128GB)
 
-All numbers measured on the same hardware. vllm-swift uses the Swift/Metal path (release build). vllm-metal uses the Python/MLX path with paged attention Metal kernels.
+All numbers measured on the same hardware with release builds. Decode output tok/s.
 
-### Qwen3-0.6B (decode output tok/s)
+> **How to read these numbers**: "Bridge direct" = Swift engine called via ctypes FFI, bypassing vLLM's Python scheduling overhead. This is the raw engine speed. "vllm serve" = full OpenAI-compatible API server with vLLM scheduler, batching, and HTTP overhead. Real-world serving uses the vllm serve path.
 
-| | Single | 8 concurrent | 32 concurrent | 64 concurrent |
-|---|:---:|:---:|:---:|:---:|
-| **vllm-swift** | **575.8** | **1,567** | **2,922** | **3,408** |
-| vllm-metal (Python) | 78.3 | 788.5 | 2,367 | — |
-
-### Qwen3-4B (decode output tok/s)
+### Qwen3-0.6B
 
 | | Single | 8 concurrent | 32 concurrent | 64 concurrent |
 |---|:---:|:---:|:---:|:---:|
-| **vllm-swift** | **178.8** | **482.2** | **1,207** | **1,533** |
-| vllm-metal (Python) | 5.3* | — | — | — |
+| **vllm-swift** (bridge direct) | **575.8** | **1,567** | **2,922** | **3,408** |
+| vllm-metal (Python/MLX) | 78.3 | 788.5 | 2,367 | — |
+
+### Qwen3-4B
+
+| | Single | 8 concurrent | 32 concurrent | 64 concurrent |
+|---|:---:|:---:|:---:|:---:|
+| **vllm-swift** (bridge direct) | **178.8** | **482.2** | **1,207** | **1,533** |
+| vllm-metal (Python/MLX) | 5.3* | — | — | — |
 
 \*vllm-metal 7B number shown (no 4B test available).
+
+**Why the speed difference?** Python/MLX has ~197ms `async_eval` overhead per decode step. The Swift bridge eliminates this by keeping the entire forward pass in compiled Swift/Metal — no Python in the GPU hot path.
 
 ### TurboQuant+ KV Cache Compression
 
@@ -61,24 +65,49 @@ Metal GPU
 - OpenAI-compatible API (`/v1/completions`, `/v1/chat/completions`)
 - Streaming (SSE) responses
 - Chat templates (applied by vLLM, model-specific)
-- Batched concurrent decode with `BatchedKVCache`
+- Batched concurrent decode with `BatchedKVCache` (fully batched projections + attention)
+- Dynamic request add/remove without full batch reinit
+- Per-request temperature sampling in batched path
 - Auto model download from HuggingFace Hub
-- TurboQuant KV cache support (`turbo3`, `turbo4`) via mlx-swift-lm
+- TurboQuant+ KV cache compression (`turbo3`, `turbo4v2`) via mlx-swift-lm
+- VLM (vision-language model) support with preprocessed pixel passthrough
+- Decode logprobs (log-probability of sampled tokens)
 - Greedy and temperature sampling
 - EOS / stop token detection (vLLM scheduler)
+
+## Known Limitations
+
+- **Prompt logprobs** not yet supported (decode logprobs work)
+- **LoRA** not supported (Swift engine limitation)
+- **Chunked prefill** disabled (Swift engine handles full sequences)
+- Only **Qwen3** models use the fully batched decode path; other models fall back to semi-batched or sequential
+- Requires macOS on Apple Silicon (no Linux/CUDA)
 
 ## Quick Start
 
 ```bash
+# One-step install (builds Swift, installs plugin, sets up metallib)
+./scripts/install.sh
+
+# Activate environment
+source activate.sh
+
+# Serve a model
+vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+```
+
+### Manual install
+
+```bash
 # Build the Swift bridge
-cd swift && swift build && cd ..
+cd swift && swift build -c release && cd ..
 
 # Install the plugin
 pip install -e .
 
-# Test
-DYLD_LIBRARY_PATH=swift/.build/arm64-apple-macosx/debug \
-  python test_bridge.py
+# Set library path and run
+DYLD_LIBRARY_PATH=swift/.build/arm64-apple-macosx/release \
+  vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
 ```
 
 ## Project Structure
@@ -88,7 +117,10 @@ vllm_swift/           Python plugin (vLLM WorkerBase)
 swift/
   Sources/VLLMBridge/       C bridge (@_cdecl exports)
   bridge.h                  C API (prefill, decode, batched decode)
-tests/                      67 tests, 95%+ coverage
+scripts/
+  install.sh                One-step build + install
+  integration_test.sh       End-to-end smoke test
+tests/                      82 tests, 97% coverage
 ```
 
 ## Requirements

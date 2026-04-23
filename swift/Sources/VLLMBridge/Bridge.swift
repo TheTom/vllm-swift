@@ -209,9 +209,15 @@ public func vsm_engine_destroy(_ handle: UnsafeMutableRawPointer?) {
 @_cdecl("vsm_engine_vocab_size")
 public func vsm_engine_vocab_size(_ handle: UnsafeMutableRawPointer?) -> Int32 {
     guard let handle else { return 0 }
-    return engineQueue.sync {
-        // TODO: get actual vocab size from model config
-        // Tokenizer protocol doesn't expose vocab size directly
+    return engineQueue.sync { () -> Int32 in
+        guard let engine = engines[handle] else { return Int32(0) }
+        // Flatten model parameters, find lm_head or embed_tokens
+        let flat = engine.model.parameters().flattened()
+        for (key, arr) in flat {
+            if key == "lm_head.weight" || key == "model.embed_tokens.weight" {
+                return Int32(arr.dim(0))
+            }
+        }
         return Int32(0)
     }
 }
@@ -219,7 +225,7 @@ public func vsm_engine_vocab_size(_ handle: UnsafeMutableRawPointer?) -> Int32 {
 @_cdecl("vsm_engine_num_layers")
 public func vsm_engine_num_layers(_ handle: UnsafeMutableRawPointer?) -> Int32 {
     guard let handle else { return 0 }
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
         // Count layers from model parameters
         let params = engine.model.parameters()
@@ -235,8 +241,24 @@ public func vsm_engine_num_layers(_ handle: UnsafeMutableRawPointer?) -> Int32 {
 
 @_cdecl("vsm_engine_head_dim")
 public func vsm_engine_head_dim(_ handle: UnsafeMutableRawPointer?) -> Int32 {
-    // TODO: extract from model config
-    return 128
+    guard let handle else { return 128 }
+    return engineQueue.sync { () -> Int32 in
+        guard let engine = engines[handle] else { return Int32(128) }
+        // k_proj.weight: [num_kv_heads * head_dim, hidden_dim]
+        let flat = engine.model.parameters().flattened()
+        var kvDim = 0
+        for (key, arr) in flat {
+            if key.hasSuffix("self_attn.k_proj.weight") {
+                kvDim = arr.dim(0)
+                break
+            }
+        }
+        guard kvDim > 0 else { return Int32(128) }
+        // Common head_dim values — find first that divides evenly
+        let candidates = [128, 96, 80, 64]
+        let match = candidates.first { kvDim % $0 == 0 }
+        return Int32(match ?? kvDim)
+    }
 }
 
 @_cdecl("vsm_engine_model_memory_bytes")
@@ -284,7 +306,7 @@ public func vsm_engine_prefill_req(
     guard let handle, let promptTokens, let reqId else { return -1 }
     let rid = String(cString: reqId)
 
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(-1) }
 
         let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
@@ -327,7 +349,7 @@ public func vsm_engine_decode_step_req(
     guard let handle, let reqId else { return -1 }
     let rid = String(cString: reqId)
 
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle],
               var session = engine.sessions[rid] else { return Int32(-1) }
 
@@ -360,7 +382,7 @@ public func vsm_engine_decode_all(
 ) -> Int32 {
     guard let handle, let reqIds, let outTokens else { return 0 }
 
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
 
         let start = CFAbsoluteTimeGetCurrent()
@@ -388,7 +410,26 @@ public func vsm_engine_decode_all(
             }
 
             // Match TokenIterator.next() pattern: return previousY, advance to next
-            let sampledTokens = argMax(lastLogits, axis: -1)
+            // TODO: temperature sampling when !allGreedy (gap #7)
+            let sampledTokens: MLXArray
+            if allGreedy {
+                sampledTokens = argMax(lastLogits, axis: -1)
+            } else {
+                // Per-request temperature sampling
+                var tokenList = [Int]()
+                for (rid, slotIdx) in sortedSlots {
+                    let temp = engine.sessions[rid]?.temperature ?? 0
+                    let logits = lastLogits[slotIdx]
+                    if temp > 0 {
+                        let scaled = logits / temp
+                        let sampled = MLXRandom.categorical(scaled)
+                        tokenList.append(sampled.item(Int.self))
+                    } else {
+                        tokenList.append(argMax(logits, axis: -1).item(Int.self))
+                    }
+                }
+                sampledTokens = MLXArray(tokenList)
+            }
             eval(sampledTokens)
 
             var count: Int32 = 0
@@ -503,7 +544,7 @@ public func vsm_engine_prefill_vlm(
     guard let handle, let promptTokens, let reqId else { return -1 }
     let rid = String(cString: reqId)
 
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(-1) }
 
         let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
@@ -569,9 +610,9 @@ public func vsm_engine_prefill_vlm(
 public func vsm_engine_init_batched(_ handle: UnsafeMutableRawPointer?) -> Int32 {
     guard let handle else { return 0 }
 
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
-        guard let qwenModel = engine.model as? Qwen3Model else { return Int32(-1) }
+        guard engine.model is Qwen3Model else { return Int32(-1) }
 
         let rids = Array(engine.sessions.keys)
         let B = rids.count
@@ -638,6 +679,101 @@ public func vsm_engine_init_batched(_ handle: UnsafeMutableRawPointer?) -> Int32
     }
 }
 
+/// Add a single request to the batched KV cache without full reinit.
+/// Must be called after prefill_req for this request.
+/// Returns the slot index, or -1 on failure.
+@_cdecl("vsm_engine_add_batch_slot")
+public func vsm_engine_add_batch_slot(
+    _ handle: UnsafeMutableRawPointer?,
+    reqId: UnsafePointer<CChar>?
+) -> Int32 {
+    guard let handle, let reqId else { return -1 }
+    let rid = String(cString: reqId)
+
+    return engineQueue.sync { () -> Int32 in
+        guard let engine = engines[handle],
+              let session = engine.sessions[rid],
+              let bCaches = engine.batchedCaches else { return Int32(-1) }
+
+        // Find next available slot
+        let slotIdx = engine.batchSlots.count
+        guard slotIdx < bCaches[0].maxBatch else { return Int32(-1) }
+
+        let numLayers = session.iterator.cache.count
+        guard numLayers == bCaches.count else { return Int32(-1) }
+
+        // Copy this request's KV cache into the batch slot
+        let tokenId = session.iterator.y.tokens.item(Int.self)
+        engine.batchTokens[slotIdx] = tokenId
+        engine.batchSlots[rid] = slotIdx
+
+        for layerIdx in 0..<numLayers {
+            let cache = session.iterator.cache[layerIdx]
+            let offset = cache.offset
+            if let (k, v) = cache.peek() {
+                bCaches[layerIdx].keys[slotIdx, 0..., ..<offset, 0...] = k[0]
+                bCaches[layerIdx].values[slotIdx, 0..., ..<offset, 0...] = v[0]
+            }
+            bCaches[layerIdx].offsets[slotIdx] = offset
+            bCaches[layerIdx].active = max(bCaches[layerIdx].active, slotIdx + 1)
+        }
+
+        // Materialize
+        var toEval = [MLXArray]()
+        for c in bCaches { toEval.append(c.keys); toEval.append(c.values) }
+        eval(toEval)
+
+        engine.batchedCaches = bCaches
+        return Int32(slotIdx)
+    }
+}
+
+/// Remove a request from the batched KV cache.
+/// Swaps the last active slot into the removed slot to keep dense packing.
+@_cdecl("vsm_engine_remove_batch_slot")
+public func vsm_engine_remove_batch_slot(
+    _ handle: UnsafeMutableRawPointer?,
+    reqId: UnsafePointer<CChar>?
+) -> Int32 {
+    guard let handle, let reqId else { return -1 }
+    let rid = String(cString: reqId)
+
+    return engineQueue.sync { () -> Int32 in
+        guard let engine = engines[handle],
+              let bCaches = engine.batchedCaches,
+              let slotIdx = engine.batchSlots[rid] else { return Int32(-1) }
+
+        let lastSlot = engine.batchSlots.count - 1
+
+        if slotIdx < lastSlot {
+            // Swap last slot into removed slot
+            guard let lastRid = engine.batchSlots.first(where: { $0.value == lastSlot })?.key
+            else { return Int32(-1) }
+
+            for layerIdx in 0..<bCaches.count {
+                let offset = bCaches[layerIdx].offsets[lastSlot]
+                bCaches[layerIdx].keys[slotIdx, 0..., ..<offset, 0...] =
+                    bCaches[layerIdx].keys[lastSlot, 0..., ..<offset, 0...]
+                bCaches[layerIdx].values[slotIdx, 0..., ..<offset, 0...] =
+                    bCaches[layerIdx].values[lastSlot, 0..., ..<offset, 0...]
+                bCaches[layerIdx].offsets[slotIdx] = offset
+            }
+
+            engine.batchTokens[slotIdx] = engine.batchTokens[lastSlot]
+            engine.batchSlots[lastRid] = slotIdx
+        }
+
+        // Clear last slot
+        engine.batchSlots.removeValue(forKey: rid)
+        for layerIdx in 0..<bCaches.count {
+            bCaches[layerIdx].active = max(0, bCaches[layerIdx].active - 1)
+        }
+
+        engine.batchedCaches = bCaches
+        return Int32(0)
+    }
+}
+
 /// Batch decode with logprobs — same as decode_all but computes
 /// log_softmax and extracts the sampled token's log-probability.
 @_cdecl("vsm_engine_decode_all_logprobs")
@@ -650,7 +786,7 @@ public func vsm_engine_decode_all_logprobs(
 ) -> Int32 {
     guard let handle, let reqIds, let outTokens, let outLogprobs else { return 0 }
 
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
 
         let start = CFAbsoluteTimeGetCurrent()
@@ -716,7 +852,7 @@ public func vsm_engine_finish_req(
 @_cdecl("vsm_engine_active_requests")
 public func vsm_engine_active_requests(_ handle: UnsafeMutableRawPointer?) -> Int32 {
     guard let handle else { return 0 }
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
         return Int32(engine.sessions.count)
     }
@@ -733,7 +869,7 @@ public func vsm_engine_decode_batch(
 ) -> Int32 {
     guard let handle, let outputTokens else { return 0 }
 
-    return engineQueue.sync {
+    return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle],
               var session = engine.sessions["_default"] else { return Int32(0) }
 

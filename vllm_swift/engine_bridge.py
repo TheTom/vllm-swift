@@ -127,6 +127,12 @@ def _get_lib():
     _lib.vsm_engine_finish_req.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _lib.vsm_engine_active_requests.restype = ctypes.c_int32
     _lib.vsm_engine_active_requests.argtypes = [ctypes.c_void_p]
+    _lib.vsm_engine_init_batched.restype = ctypes.c_int32
+    _lib.vsm_engine_init_batched.argtypes = [ctypes.c_void_p]
+    _lib.vsm_engine_add_batch_slot.restype = ctypes.c_int32
+    _lib.vsm_engine_add_batch_slot.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _lib.vsm_engine_remove_batch_slot.restype = ctypes.c_int32
+    _lib.vsm_engine_remove_batch_slot.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _lib.vsm_engine_decode_all.restype = ctypes.c_int32
     _lib.vsm_engine_decode_all.argtypes = [
         ctypes.c_void_p,
@@ -238,6 +244,29 @@ class SwiftInferenceEngine:
 
     def active_requests(self) -> int:
         return self._lib.vsm_engine_active_requests(self._handle)
+
+    def init_batched(self) -> int:
+        """Initialize batched KV caches for fully batched decode.
+
+        Copies per-request cache state into shared BatchedKVCache.
+        Must be called after prefill and when request set changes.
+        Returns number of batched requests, or -1 if model doesn't support it.
+        """
+        return self._lib.vsm_engine_init_batched(self._handle)
+
+    def add_batch_slot(self, req_id: str) -> int:
+        """Add a request to the batched KV cache incrementally.
+
+        Returns slot index, or -1 on failure.
+        """
+        return self._lib.vsm_engine_add_batch_slot(self._handle, req_id.encode())
+
+    def remove_batch_slot(self, req_id: str) -> int:
+        """Remove a request from the batched KV cache.
+
+        Returns 0 on success, -1 on failure.
+        """
+        return self._lib.vsm_engine_remove_batch_slot(self._handle, req_id.encode())
 
     def decode_all(self, max_reqs: int = 64) -> list[tuple[str, int]]:
         """Decode one step for ALL active sessions in a single call.

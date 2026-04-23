@@ -407,6 +407,98 @@ class TestSwiftMetalWorker:
         output = worker.sample_tokens(None)
         assert output.sampled_token_ids == [[42]]
 
+    def test_decode_skips_reinit_when_stable(self):
+        worker = self._make_worker()
+        mock_engine = MagicMock()
+        mock_engine.decode_all.return_value = [("req-001", 55)]
+        worker.engine = mock_engine
+        worker._active_requests["req-001"] = [42]
+        worker._request_params["req-001"] = {"temperature": 0.0, "top_p": 1.0}
+        worker._batched_initialized = True  # already initialized
+
+        cached_data = MagicMock()
+        cached_data.req_ids = ["req-001"]
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = []
+        scheduler_output.scheduled_cached_reqs = cached_data
+        scheduler_output.finished_req_ids = []
+        worker.execute_model(scheduler_output)
+
+        # No new reqs, no finished, already initialized → skip reinit
+        mock_engine.init_batched.assert_not_called()
+
+    def test_decode_reinits_batched_on_first_batch(self):
+        worker = self._make_worker()
+        mock_engine = MagicMock()
+        mock_engine.decode_all.return_value = [("req-001", 55)]
+        worker.engine = mock_engine
+        worker._active_requests["req-001"] = [42]
+        worker._request_params["req-001"] = {"temperature": 0.0, "top_p": 1.0}
+        assert not worker._batched_initialized
+
+        cached_data = MagicMock()
+        cached_data.req_ids = ["req-001"]
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = []
+        scheduler_output.scheduled_cached_reqs = cached_data
+        scheduler_output.finished_req_ids = []
+        worker.execute_model(scheduler_output)
+
+        mock_engine.init_batched.assert_called_once()
+        assert worker._batched_initialized
+
+    def test_incremental_batch_add_on_new_request(self):
+        worker = self._make_worker()
+        mock_engine = MagicMock()
+        mock_engine.prefill_req.return_value = 10
+        mock_engine.decode_all.return_value = [("req-001", 20), ("req-002", 30)]
+        worker.engine = mock_engine
+        worker._batched_initialized = True
+        worker._active_requests["req-001"] = [5]
+        worker._request_params["req-001"] = {"temperature": 0.0, "top_p": 1.0}
+
+        new_req = MagicMock()
+        new_req.req_id = "req-002"
+        new_req.prompt_token_ids = [1, 2]
+        new_req.sampling_params.temperature = 0.0
+        new_req.sampling_params.top_p = 1.0
+        new_req.sampling_params.logprobs = None
+        new_req.mm_features = None
+
+        cached_data = MagicMock()
+        cached_data.req_ids = ["req-001"]
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = [new_req]
+        scheduler_output.scheduled_cached_reqs = cached_data
+        scheduler_output.finished_req_ids = []
+        worker.execute_model(scheduler_output)
+
+        # Should use incremental add, not full reinit
+        mock_engine.init_batched.assert_not_called()
+        mock_engine.add_batch_slot.assert_called_once_with("req-002")
+
+    def test_incremental_batch_remove_on_finished(self):
+        worker = self._make_worker()
+        mock_engine = MagicMock()
+        mock_engine.decode_all.return_value = [("req-001", 20)]
+        worker.engine = mock_engine
+        worker._batched_initialized = True
+        worker._active_requests["req-001"] = [5]
+        worker._active_requests["req-done"] = [10]
+        worker._request_params["req-001"] = {}
+        worker._request_params["req-done"] = {}
+
+        cached_data = MagicMock()
+        cached_data.req_ids = ["req-001"]
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = []
+        scheduler_output.scheduled_cached_reqs = cached_data
+        scheduler_output.finished_req_ids = ["req-done"]
+        worker.execute_model(scheduler_output)
+
+        mock_engine.init_batched.assert_not_called()
+        mock_engine.remove_batch_slot.assert_called_once_with("req-done")
+
     def test_finished_requests_cleaned_up(self):
         worker = self._make_worker()
         worker.engine = MagicMock()

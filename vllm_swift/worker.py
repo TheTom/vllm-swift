@@ -115,9 +115,10 @@ class SwiftMetalWorker:
         self.engine: SwiftInferenceEngine | None = None
         self.device = torch.device("cpu")
 
-        # Request state: maps request_id → list of generated token IDs
+        # Request state
         self._active_requests: dict[str, list[int]] = {}
         self._request_params: dict[str, dict] = {}
+        self._batched_initialized = False
 
         # Extract TurboQuant config from additional_config
         add = getattr(vllm_config, "additional_config", None) or {}
@@ -269,18 +270,27 @@ class SwiftMetalWorker:
             req_ids.append(req_id)
             sampled_token_ids.append([first_token])
 
-        # Batch decode all active sessions in one Swift call
+        # Batch decode all active sessions
         cached = scheduler_output.scheduled_cached_reqs
         cached_req_ids = list(cached.req_ids)
         if cached_req_ids:
-            # Check if any request wants logprobs
+            if not self._batched_initialized:
+                # First time: full init from all per-request caches
+                self.engine.init_batched()
+                self._batched_initialized = True
+            else:
+                # Incremental updates: remove finished, add new
+                for rid in scheduler_output.finished_req_ids:
+                    self.engine.remove_batch_slot(rid)
+                for new_req in scheduler_output.scheduled_new_reqs:
+                    self.engine.add_batch_slot(new_req.req_id)
+
             wants_logprobs = any(
                 self._request_params.get(rid, {}).get("logprobs", False) for rid in cached_req_ids
             )
             if wants_logprobs:
                 lp_results = self.engine.decode_all_logprobs(max_reqs=len(cached_req_ids))
                 result_map = {rid: tok for rid, tok, _ in lp_results}
-                # TODO: build LogprobsLists from lp_results logprob values
             else:
                 batch_results = self.engine.decode_all(max_reqs=len(cached_req_ids))
                 result_map = {rid: tok for rid, tok in batch_results}

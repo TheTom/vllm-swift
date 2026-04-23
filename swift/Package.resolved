@@ -1,5 +1,5 @@
 {
-  "originHash" : "4de6829aedf6199246b3402c2709029d31f623d1c03630e7d6799c88716708cc",
+  "originHash" : "9de08de28e684dacbd73116ef3da6ab33fb2a8221d6cd295441447a42b3626a0",
   "pins" : [
     {
       "identity" : "mlx-swift",
@@ -8,6 +8,15 @@
       "state" : {
         "branch" : "alpha",
         "revision" : "c92f80d7f05210a259642324cfbfc891265734a3"
+      }
+    },
+    {
+      "identity" : "mlx-swift-lm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/TheTom/mlx-swift-lm.git",
+      "state" : {
+        "branch" : "vllm-swift-stable",
+        "revision" : "d0f6987ec3a6d408a84ac382033183ac3fba45b8"
       }
     },
     {
