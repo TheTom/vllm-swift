@@ -223,16 +223,20 @@ class SwiftMetalWorker:
             req_ids.append(req_id)
             sampled_token_ids.append([first_token])
 
-        # Decode step per request (sequential — batch inference TBD)
+        # Batch decode all active sessions in one Swift call
         cached = scheduler_output.scheduled_cached_reqs
-        for req_id in cached.req_ids:
-            token = self.engine.decode_step_req(req_id)
-            if token >= 0:
-                self._active_requests.setdefault(req_id, []).append(token)
-                sampled_token_ids.append([token])
-            else:
-                sampled_token_ids.append([])
-            req_ids.append(req_id)
+        cached_req_ids = list(cached.req_ids)
+        if cached_req_ids:
+            batch_results = self.engine.decode_all(max_reqs=len(cached_req_ids))
+            result_map = {rid: tok for rid, tok in batch_results}
+            for req_id in cached_req_ids:
+                token = result_map.get(req_id, -1)
+                if token >= 0:
+                    self._active_requests.setdefault(req_id, []).append(token)
+                    sampled_token_ids.append([token])
+                else:
+                    sampled_token_ids.append([])
+                req_ids.append(req_id)
 
         # Clean up finished requests (free Swift KV cache)
         for req_id in scheduler_output.finished_req_ids:
