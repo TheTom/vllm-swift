@@ -128,6 +128,7 @@ Metal GPU
 - Greedy and temperature sampling
 - EOS / stop token detection (vLLM scheduler)
 - VLM (vision-language model) support (experimental)
+- Tested with [Hermes](https://github.com/NousResearch/hermes) and [OpenCode](https://github.com/nicholasbutler/opencode) — works with any tool that supports vLLM or OpenAI-compatible APIs
 
 ## Configuration
 
