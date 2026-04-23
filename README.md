@@ -1,6 +1,10 @@
-# vllm-swift
+<p align="center">
+  <img src="assets/logo.png" alt="vllm-swift" width="400">
+</p>
 
-Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference hot path.
+<p align="center">
+  Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference hot path.
+</p>
 
 ## Quick Start
 
