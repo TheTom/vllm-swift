@@ -2,6 +2,26 @@
 
 Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference hot path.
 
+## Quick Start
+
+```bash
+brew tap TheTom/tap && brew install vllm-swift
+
+python3 -m venv .venv && source .venv/bin/activate
+pip install vllm
+vllm-swift setup
+vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/TheTom/vllm-swift.git && cd vllm-swift
+./scripts/install.sh
+source activate.sh
+vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+```
+
 ## Performance (M5 Max 128GB)
 
 All numbers measured on the same hardware with release builds. Decode output tok/s.
@@ -83,22 +103,45 @@ Metal GPU
 - Only **Qwen3** models use the fully batched decode path; other models fall back to semi-batched or sequential
 - Requires macOS on Apple Silicon (no Linux/CUDA)
 
-## Quick Start
+## Install
+
+### Homebrew (recommended)
 
 ```bash
+brew tap TheTom/tap
+brew install vllm-swift
+
+# Set up Python environment (one time)
+python3 -m venv .venv && source .venv/bin/activate
+pip install vllm
+vllm-swift setup
+
+# Serve a model
+vllm-swift serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+```
+
+The `vllm-swift` command handles `DYLD_LIBRARY_PATH` automatically — no env vars to manage.
+
+### From source
+
+```bash
+git clone https://github.com/TheTom/vllm-swift.git
+cd vllm-swift
+
 # One-step install (builds Swift, installs plugin, sets up metallib)
 ./scripts/install.sh
 
-# Activate environment
+# Activate and serve
 source activate.sh
-
-# Serve a model
 vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
 ```
 
-### Manual install
+### Manual (full control)
 
 ```bash
+git clone https://github.com/TheTom/vllm-swift.git
+cd vllm-swift
+
 # Build the Swift bridge
 cd swift && swift build -c release && cd ..
 
@@ -108,6 +151,16 @@ pip install -e .
 # Set library path and run
 DYLD_LIBRARY_PATH=swift/.build/arm64-apple-macosx/release \
   vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048
+```
+
+### Download a model
+
+```bash
+# MLX-format models from HuggingFace
+huggingface-cli download mlx-community/Qwen3-0.6B-4bit --local-dir ~/models/Qwen3-0.6B-4bit
+
+# Or vllm-swift will auto-download if huggingface_hub is installed
+vllm-swift serve mlx-community/Qwen3-0.6B-4bit --max-model-len 2048
 ```
 
 ## Project Structure
@@ -120,15 +173,18 @@ swift/
 scripts/
   install.sh                One-step build + install
   integration_test.sh       End-to-end smoke test
+homebrew/
+  vllm-swift.rb             Homebrew formula
 tests/                      82 tests, 97% coverage
 ```
 
 ## Requirements
 
 - macOS 14+ on Apple Silicon
-- Swift 6.0+
+- Xcode 15+ or Swift 6.0+ toolchain (for building from source; Homebrew handles this)
 - Python 3.10+
-- [mlx-swift-lm](https://github.com/ekryski/mlx-swift-lm) alpha branch
+- [vLLM](https://github.com/vllm-project/vllm) 0.19+
+- [mlx-swift-lm](https://github.com/TheTom/mlx-swift-lm/tree/vllm-swift-stable) (pulled automatically by Swift Package Manager)
 
 ## License
 
