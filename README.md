@@ -27,48 +27,15 @@ git clone https://github.com/TheTom/vllm-swift.git && cd vllm-swift
 ```bash
 vllm-swift download mlx-community/Qwen3-4B-4bit
 vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048
-# Server running at http://localhost:8000 (OpenAI-compatible API)
 ```
 
-> Drop-in replacement for vLLM on Apple Silicon. All standard `vllm serve` flags work.
+Server running at `http://localhost:8000` (OpenAI-compatible API).
 
-### Use with AI tools (Hermes, OpenCode, etc.)
-
-```bash
-# Start server with tool calling enabled
-vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 40960 \
-  --served-model-name qwen3-4b \
-  --enable-auto-tool-choice --tool-call-parser hermes
-```
-
-Then point your tool at it:
-
-```bash
-# Hermes — set in ~/.hermes/config.yaml:
-#   base_url: http://localhost:8000/v1
-#   model: qwen3-4b
-
-# OpenCode
-OPENAI_API_BASE=http://localhost:8000/v1 OPENAI_API_KEY=local opencode
-
-# Any OpenAI-compatible client
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-4b","messages":[{"role":"user","content":"Hello"}]}'
-```
-
-### Long context with TurboQuant+
-
-Enable [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV cache compression (3-5x memory savings, no speed penalty):
-
-```bash
-vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 32768 \
-  --additional-config '{"kv_scheme": "turbo3", "kv_bits": 3}'
-```
+> Drop-in replacement for vLLM on Apple Silicon. All `vllm serve` flags work unchanged.
 
 ## Performance (M5 Max 128GB)
 
-Up to 2.4x higher throughput at low concurrency by eliminating Python overhead in the inference hot path.
+Up to 2.4x higher throughput at low concurrency by removing Python from the inference hot path.
 
 Decode output tok/s. Prompt=18 tokens, generation=50 tokens (short-context decode benchmark), greedy.
 
@@ -128,7 +95,32 @@ Metal GPU
 - Greedy and temperature sampling
 - EOS / stop token detection (vLLM scheduler)
 - VLM (vision-language model) support (experimental)
-- Tested with [Hermes](https://github.com/NousResearch/hermes) and [OpenCode](https://github.com/nicholasbutler/opencode) — works with any tool that supports vLLM or OpenAI-compatible APIs
+- Works with [Hermes](https://github.com/NousResearch/hermes), [OpenCode](https://github.com/nicholasbutler/opencode), and any OpenAI-compatible client
+
+## Use with AI tools
+
+```bash
+# Start server with tool calling enabled
+vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 40960 \
+  --served-model-name qwen3-4b \
+  --enable-auto-tool-choice --tool-call-parser hermes
+```
+
+Then point your tool at it:
+
+```bash
+# Hermes — set in ~/.hermes/config.yaml:
+#   base_url: http://localhost:8000/v1
+#   model: qwen3-4b
+
+# OpenCode
+OPENAI_API_BASE=http://localhost:8000/v1 OPENAI_API_KEY=local opencode
+
+# Any OpenAI-compatible client
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-4b","messages":[{"role":"user","content":"Hello"}]}'
+```
 
 ## Configuration
 
@@ -176,7 +168,7 @@ vllm-swift serve ~/models/Qwen3-4B-4bit \
 | `turbo3` | 4.6x | Maximum compression, long context |
 | `turbo4v2` | 3.2x | Balanced quality/compression |
 
-### Kitchen sink (agent + reasoning + TurboQuant+)
+### Full setup (agent + reasoning + TurboQuant+)
 
 ```bash
 vllm-swift serve ~/models/Qwen3-4B-4bit \
