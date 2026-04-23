@@ -100,6 +100,11 @@ class SwiftMetalPlatform(Platform):
 
         parallel_config.disable_custom_all_reduce = True
 
+        # Swift engine manages its own KV cache — disable prefix caching
+        # to use the simpler UnitaryKVCacheCoordinator
+        cache_config = vllm_config.cache_config
+        cache_config.enable_prefix_caching = False
+
         # Disable chunked prefill — Swift engine handles full sequences
         if getattr(scheduler_config, "enable_chunked_prefill", False):
             scheduler_config.enable_chunked_prefill = False
@@ -120,5 +125,5 @@ class SwiftMetalPlatformPlugin:
     def register() -> str | None:
         if SwiftMetalPlatform.is_available():
             logger.info("Swift Metal platform plugin activated")
-            return "vllm_swift_metal.platform:SwiftMetalPlatform"
+            return "vllm_swift_metal.platform.SwiftMetalPlatform"
         return None

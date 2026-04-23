@@ -75,6 +75,7 @@ class TestSwiftMetalPlatform:
         vllm_config.scheduler_config.enable_chunked_prefill = True
         vllm_config.scheduler_config.max_num_batched_tokens = 1024
         vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = True
 
         SwiftMetalPlatform.check_and_update_config(vllm_config)
 
@@ -106,12 +107,12 @@ class TestSwiftMetalPlatform:
 
 
 class TestPlatformPlugin:
-    def test_register_returns_class_on_apple_silicon(self):
+    def test_register_returns_class_when_available(self):
         from vllm_swift_metal.platform import SwiftMetalPlatformPlugin
 
-        if platform.system() == "Darwin" and platform.machine() == "arm64":
+        with patch("vllm_swift_metal.platform.SwiftMetalPlatform.is_available", return_value=True):
             result = SwiftMetalPlatformPlugin.register()
-            assert result == "vllm_swift_metal.platform:SwiftMetalPlatform"
+            assert result == "vllm_swift_metal.platform.SwiftMetalPlatform"
 
     def test_register_returns_none_on_unsupported(self):
         from vllm_swift_metal.platform import SwiftMetalPlatformPlugin

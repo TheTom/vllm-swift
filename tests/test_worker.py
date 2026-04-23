@@ -179,11 +179,14 @@ class TestSwiftMetalWorker:
         new_req.prompt_token_ids = [1, 2, 3, 4]
         new_req.sampling_params.temperature = 0.0
         new_req.sampling_params.top_p = 1.0
+        cached_data = MagicMock()
+        cached_data.req_ids = []
         scheduler_output.scheduled_new_reqs = [new_req]
-        scheduler_output.scheduled_cached_reqs = []
+        scheduler_output.scheduled_cached_reqs = cached_data
         scheduler_output.finished_req_ids = []
 
-        output = worker.execute_model(scheduler_output)
+        assert worker.execute_model(scheduler_output) is None
+        output = worker.sample_tokens(None)
         assert output is not None
         assert output.req_ids == ["req-001"]
         assert output.sampled_token_ids == [[42]]
@@ -198,25 +201,33 @@ class TestSwiftMetalWorker:
         worker._active_requests["req-001"] = [42]
         worker._request_params["req-001"] = {"temperature": 0.0, "top_p": 1.0}
 
+        cached_data = MagicMock()
+        cached_data.req_ids = ["req-001"]
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        cached = MagicMock()
-        cached.req_id = "req-001"
-        scheduler_output.scheduled_cached_reqs = [cached]
+        scheduler_output.scheduled_cached_reqs = cached_data
         scheduler_output.finished_req_ids = []
 
-        output = worker.execute_model(scheduler_output)
+        assert worker.execute_model(scheduler_output) is None
+        output = worker.sample_tokens(None)
         assert output.sampled_token_ids == [[99]]
 
     def test_execute_model_raises_without_engine(self):
         worker = self._make_worker()
+        cached_data = MagicMock()
+        cached_data.req_ids = []
         with pytest.raises(RuntimeError, match="not loaded"):
             worker.execute_model(
-                MagicMock(scheduled_new_reqs=[], scheduled_cached_reqs=[], finished_req_ids=[])
+                MagicMock(
+                    scheduled_new_reqs=[],
+                    scheduled_cached_reqs=cached_data,
+                    finished_req_ids=[],
+                )
             )
 
-    def test_sample_tokens_returns_none(self):
+    def test_sample_tokens_returns_pending(self):
         worker = self._make_worker()
+        # No pending output
         assert worker.sample_tokens(None) is None
 
     def test_get_model_returns_engine(self):
@@ -290,15 +301,37 @@ class TestSwiftMetalWorker:
         worker._active_requests["req-eos"] = [42]
         worker._request_params["req-eos"] = {}
 
+        cached_data = MagicMock()
+        cached_data.req_ids = ["req-eos"]
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        cached = MagicMock()
-        cached.req_id = "req-eos"
-        scheduler_output.scheduled_cached_reqs = [cached]
+        scheduler_output.scheduled_cached_reqs = cached_data
         scheduler_output.finished_req_ids = []
 
-        output = worker.execute_model(scheduler_output)
+        assert worker.execute_model(scheduler_output) is None
+        output = worker.sample_tokens(None)
         assert output.sampled_token_ids == [[]]
+
+    def test_empty_scheduler_step(self):
+        worker = self._make_worker()
+        worker.engine = MagicMock()
+
+        cached_data = MagicMock()
+        cached_data.req_ids = []
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = []
+        scheduler_output.scheduled_cached_reqs = cached_data
+        scheduler_output.finished_req_ids = set()
+
+        result = worker.execute_model(scheduler_output)
+        assert result is not None  # returns empty output directly
+        assert result.req_ids == []
+
+    def test_reset_methods_no_crash(self):
+        worker = self._make_worker()
+        worker.reset_mm_cache()
+        assert worker.reset_prefix_cache() is True
+        worker.reset_encoder_cache()
 
     def test_finished_requests_cleaned_up(self):
         worker = self._make_worker()
@@ -306,9 +339,11 @@ class TestSwiftMetalWorker:
         worker._active_requests["req-done"] = [1, 2, 3]
         worker._request_params["req-done"] = {}
 
+        cached_data = MagicMock()
+        cached_data.req_ids = []
         scheduler_output = MagicMock()
         scheduler_output.scheduled_new_reqs = []
-        scheduler_output.scheduled_cached_reqs = []
+        scheduler_output.scheduled_cached_reqs = cached_data
         scheduler_output.finished_req_ids = ["req-done"]
 
         worker.execute_model(scheduler_output)

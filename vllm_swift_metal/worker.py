@@ -158,20 +158,20 @@ class SwiftMetalWorker:
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Return KV cache spec for the scheduler.
 
-        The Swift engine manages its own KV cache internally.
-        We report a minimal spec so vLLM's scheduler can track capacity.
+        Swift engine manages the real KV cache. We report a uniform spec
+        so vLLM's scheduler can track capacity and block allocation.
         """
         num_layers = self.engine.num_layers if self.engine else 28
         head_dim = self.engine.head_dim if self.engine else 128
-        # Report 1 KV head per layer — Swift manages the real cache
+        block_size = self.cache_config.block_size
         specs = {}
         for i in range(num_layers):
-            layer_name = f"model.layers.{i}.self_attn"
+            layer_name = f"layers.{i}.self_attn"
             specs[layer_name] = FullAttentionSpec(
+                block_size=block_size,
                 num_kv_heads=1,
                 head_size=head_dim,
                 dtype=torch.float16,
-                use_mla=False,
             )
         return specs
 
@@ -226,8 +226,8 @@ class SwiftMetalWorker:
             sampled_token_ids.append([first_token])
 
         # Handle cached requests (decode)
-        for cached_req in scheduler_output.scheduled_cached_reqs:
-            req_id = cached_req.req_id
+        cached = scheduler_output.scheduled_cached_reqs
+        for req_id in cached.req_ids:
             params = self._request_params.get(req_id, {})
 
             token = self.engine.decode_step(
@@ -242,30 +242,32 @@ class SwiftMetalWorker:
                 sampled_token_ids.append([])
             req_ids.append(req_id)
 
+        # Handle empty scheduler step (cleanup only)
+        if not req_ids and not scheduler_output.finished_req_ids:
+            return ModelRunnerOutput(
+                req_ids=[],
+                req_id_to_index={},
+                sampled_token_ids=[],
+            )
+
         # Clean up finished requests
         for req_id in scheduler_output.finished_req_ids:
             self._active_requests.pop(req_id, None)
             self._request_params.pop(req_id, None)
 
-        # Build output
-        num_reqs = len(req_ids)
-        spec_token_ids = [[] for _ in range(num_reqs)]
-
-        return ModelRunnerOutput(
+        # Stash output for sample_tokens (matches vLLM's async pattern)
+        self._pending_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
             sampled_token_ids=sampled_token_ids,
-            spec_token_ids=spec_token_ids,
-            logprob_token_ids=None,
-            logprobs=None,
-            prompt_logprob_token_ids=None,
-            prompt_logprobs=None,
-            num_nans_in_logits=0,
         )
+        return None  # signal that sample_tokens will provide the output
 
     def sample_tokens(self, grammar_output: GrammarOutput | None) -> ModelRunnerOutput | None:
-        """Sample tokens (not used — execute_model returns tokens directly)."""
-        return None
+        """Return the output computed by execute_model."""
+        output = getattr(self, "_pending_output", None)
+        self._pending_output = None
+        return output
 
     def get_model(self) -> Any:
         return self.engine
@@ -292,13 +294,22 @@ class SwiftMetalWorker:
         return set()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return (SupportedTask.generate,)
+        return ("generate",)
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("Sleep not supported on Swift Metal")
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         logger.warning("Sleep not supported on Swift Metal")
+
+    def reset_mm_cache(self) -> None:
+        pass
+
+    def reset_prefix_cache(self) -> bool:
+        return True
+
+    def reset_encoder_cache(self) -> None:
+        pass
 
     def check_health(self) -> None:
         if self.engine is None:
