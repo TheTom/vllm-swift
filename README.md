@@ -27,11 +27,12 @@ git clone https://github.com/TheTom/vllm-swift.git && cd vllm-swift
 ```bash
 vllm-swift download mlx-community/Qwen3-4B-4bit
 vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048
+# Server running at http://localhost:8000 (OpenAI-compatible API)
 ```
 
-> `vllm-swift` wraps vLLM with the Swift backend preconfigured. All standard `vllm serve` flags work.
+> Drop-in replacement for vLLM on Apple Silicon. All standard `vllm serve` flags work.
 
-For long context, enable TurboQuant+ KV cache compression (3-5x memory savings, no speed penalty):
+For long context, enable [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV cache compression (3-5x memory savings, no speed penalty):
 
 ```bash
 vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 32768 \
@@ -40,12 +41,12 @@ vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 32768 \
 
 ## Performance (M5 Max 128GB)
 
-Decode output tok/s. Prompt=18 tokens, generation=50 tokens, greedy decode.
+Up to 2.4x higher throughput at low concurrency by eliminating Python overhead in the inference hot path.
 
-> **Bridge direct** = raw Swift/Metal engine (no vLLM scheduler)
+Decode output tok/s. Prompt=18 tokens, generation=50 tokens (short-context decode benchmark), greedy.
+
+> **Bridge direct** = raw Swift/Metal engine (no vLLM scheduler)  
 > **vllm serve** = full API server (scheduling + HTTP overhead)
-
-Throughput improves most at low concurrency where per-step Python overhead dominates, and converges at high batch sizes where GPU compute takes over.
 
 ### Qwen3-0.6B
 
@@ -61,11 +62,9 @@ Throughput improves most at low concurrency where per-step Python overhead domin
 | **vllm-swift** (bridge direct) | **149** | **479** | **1,166** | **1,519** |
 | vllm-metal (Python/MLX) | 105 | 408 | 1,067 | 1,387 |
 
-The gap is largest at low concurrency (2.4x on 0.6B single-request) where per-step Python overhead dominates, and narrows at high batch sizes where GPU compute becomes the bottleneck.
+### [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV Cache Compression
 
-### TurboQuant+ KV Cache Compression
-
-TurboQuant+ enables longer context by compressing KV cache without affecting throughput.
+[TurboQuant+](https://github.com/TheTom/turboquant_plus) enables longer context by compressing KV cache with no measurable impact on throughput.
 
 **Qwen3.5 2B (4-bit weights)**
 
@@ -97,15 +96,15 @@ Metal GPU
 - Batched concurrent decode with `BatchedKVCache` (fully batched projections + attention)
 - Per-request temperature sampling in batched path
 - Auto model download from HuggingFace Hub
-- TurboQuant+ KV cache compression (`turbo3`, `turbo4v2`) via mlx-swift-lm
-- Decode logprobs and prompt logprobs
+- [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV cache compression (`turbo3`, `turbo4v2`) via mlx-swift-lm
+- Decode and prompt logprobs
 - Greedy and temperature sampling
 - EOS / stop token detection (vLLM scheduler)
 - VLM (vision-language model) support (experimental)
 
 ## Configuration
 
-### TurboQuant+ KV Cache Compression
+### [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV Cache Compression
 
 Compress KV cache 3-5x to fit longer context with minimal quality loss:
 
