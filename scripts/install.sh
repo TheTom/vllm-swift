@@ -100,7 +100,7 @@ echo ""
 # Install Python plugin
 echo "Installing Python plugin..."
 cd "$PROJECT_DIR"
-pip install -e . --quiet 2>&1 | tail -3
+pip3 install -e . --quiet 2>&1 | tail -3
 echo "  Installed: vllm-swift (editable)"
 echo ""
 
@@ -128,5 +128,5 @@ echo ""
 echo "Quick start:"
 echo "  cd $PROJECT_DIR"
 echo "  source activate.sh"
-echo "  vllm serve ~/models/Qwen3-4B-4bit --max-model-len 2048"
+echo "  vllm serve ~/models/Qwen3-4B-4bit --max-model-len 4096"
 echo ""
