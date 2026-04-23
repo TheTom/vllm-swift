@@ -357,7 +357,7 @@ class TestSwiftMetalWorker:
     def test_execute_model_vlm_prefill(self):
         worker = self._make_worker()
         mock_engine = MagicMock()
-        mock_engine.prefill_vlm.return_value = 33
+        mock_engine.prefill_req.return_value = 33
         mock_engine.decode_all.return_value = []
         worker.engine = mock_engine
 
@@ -385,7 +385,8 @@ class TestSwiftMetalWorker:
         assert output is not None
         assert output.req_ids == ["vlm-001"]
         assert output.sampled_token_ids == [[33]]
-        mock_engine.prefill_vlm.assert_called_once()
+        # Falls back to text-only prefill (VLM images not yet supported e2e)
+        mock_engine.prefill_req.assert_called_once()
 
     def test_execute_model_with_logprobs(self):
         worker = self._make_worker()

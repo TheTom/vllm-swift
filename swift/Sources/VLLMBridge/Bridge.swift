@@ -4,6 +4,7 @@
 // Wraps mlx-swift-lm's TokenIterator to expose a C API for Python ctypes.
 // All GPU compute stays here in Swift/Metal — Python only drives scheduling.
 
+import CoreImage
 import Foundation
 import MLX
 import MLXNN
@@ -511,31 +512,6 @@ public func vsm_engine_prefill_vlm(
     guard let handle, let promptTokens, let reqId else { return -1 }
     let rid = String(cString: reqId)
 
-    // Pre-process image outside the engine lock (async-safe)
-    var preprocessedInput: LMInput?
-    if let imagePath, imagePathLen > 0 {
-        let imgPathStr = String(cString: imagePath)
-        if let engine = engineQueue.sync(execute: { engines[handle] }),
-           let proc = engine.processor
-        {
-            let imgURL = URL(fileURLWithPath: imgPathStr)
-            let userInput = UserInput(
-                prompt: .text(""),
-                images: [.url(imgURL)]
-            )
-            nonisolated(unsafe) var result: LMInput?
-            let sem = DispatchSemaphore(value: 0)
-            let box = UnsafeSendable(proc)
-            let inputBox = UnsafeSendable(userInput)
-            Task { @Sendable in
-                result = try? await box.value.prepare(input: inputBox.value)
-                sem.signal()
-            }
-            sem.wait()
-            preprocessedInput = result
-        }
-    }
-
     return engineQueue.sync {
         guard let engine = engines[handle] else { return Int32(-1) }
 
@@ -546,7 +522,49 @@ public func vsm_engine_prefill_vlm(
         params.temperature = temperature
         params.topP = topP
 
-        let input = preprocessedInput ?? LMInput(text: .init(tokens: tokenArray))
+        // Build LMInput — for VLM, load image and create ProcessedImage
+        let input: LMInput
+        if let imagePath, imagePathLen > 0 {
+            let imgPathStr = String(cString: imagePath)
+            let imgURL = URL(fileURLWithPath: imgPathStr)
+
+            // Load image via CIImage → resize → normalize → MLXArray
+            if let ciImage = CIImage(contentsOf: imgURL) {
+                let ctx = CIContext()
+                let extent = ciImage.extent
+                let w = Int(extent.width)
+                let h = Int(extent.height)
+
+                // Render to RGBA bitmap
+                var bitmap = [UInt8](repeating: 0, count: w * h * 4)
+                ctx.render(ciImage,
+                           toBitmap: &bitmap, rowBytes: w * 4,
+                           bounds: extent,
+                           format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+
+                // Convert to float32 [C, H, W], normalized to [0, 1]
+                var pixels = [Float](repeating: 0, count: 3 * h * w)
+                for y in 0..<h {
+                    for x in 0..<w {
+                        let idx = (y * w + x) * 4
+                        pixels[0 * h * w + y * w + x] = Float(bitmap[idx]) / 255.0     // R
+                        pixels[1 * h * w + y * w + x] = Float(bitmap[idx + 1]) / 255.0 // G
+                        pixels[2 * h * w + y * w + x] = Float(bitmap[idx + 2]) / 255.0 // B
+                    }
+                }
+
+                let pixelArray = MLXArray(pixels).reshaped(1, 3, h, w)
+                let processedImage = LMInput.ProcessedImage(
+                    pixels: pixelArray, frames: [THW(1, h, w)]
+                )
+                input = LMInput(text: .init(tokens: tokenArray), image: processedImage)
+            } else {
+                print("[vsm] Failed to load image: \(imgPathStr)")
+                input = LMInput(text: .init(tokens: tokenArray))
+            }
+        } else {
+            input = LMInput(text: .init(tokens: tokenArray))
+        }
 
         do {
             var iterator = try TokenIterator(
