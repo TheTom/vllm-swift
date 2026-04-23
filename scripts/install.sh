@@ -126,6 +126,7 @@ fi
 echo "=== Installation complete ==="
 echo ""
 echo "Quick start:"
+echo "  cd $PROJECT_DIR"
 echo "  source activate.sh"
-echo "  vllm serve ~/models/Qwen3-0.6B-4bit --max-model-len 2048"
+echo "  vllm serve ~/models/Qwen3-4B-4bit --max-model-len 2048"
 echo ""
