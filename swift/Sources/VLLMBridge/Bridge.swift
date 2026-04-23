@@ -59,6 +59,14 @@ final class InferenceEngine {
     var sessions: [String: RequestSession] = [:]
     var generateParams: GenerateParameters
 
+    /// Batched KV caches: one per layer, shared across all requests.
+    /// Used by fullyBatchedDecode when model is Qwen3.
+    var batchedCaches: [BatchedKVCache]?
+    /// Maps request ID → batch slot index in batchedCaches.
+    var batchSlots: [String: Int] = [:]
+    /// Last token per batch slot for batched decode.
+    var batchTokens: [Int] = []
+
     // Perf tracking
     var prefillTokensPerSec: Double = 0
     var totalDecodeTokens: Int32 = 0
@@ -335,16 +343,48 @@ public func vsm_engine_decode_all(
         let rids = Array(engine.sessions.keys.prefix(Int(maxReqs)))
         guard !rids.isEmpty else { return Int32(0) }
 
-        // Try batched path if model supports it
+        // Fully batched path for Qwen3 with BatchedKVCache
+        if let qwenModel = engine.model as? Qwen3Model,
+           let bCaches = engine.batchedCaches,
+           !engine.batchSlots.isEmpty
+        {
+            let B = engine.batchSlots.count
+            let tokens = engine.batchTokens
+
+            // Single batched forward: [B, 1] → [B, 1, vocab]
+            let inputBatch = MLXArray(tokens[0..<B]).reshaped(B, 1)
+            let logitsBatch = qwenModel.fullyBatchedDecode(inputBatch, caches: bCaches)
+
+            // Sample all tokens at once (greedy argmax batched)
+            let lastLogits = logitsBatch[0..., -1, 0...]  // [B, vocab]
+            let sampledTokens = argMax(lastLogits, axis: -1)  // [B]
+            eval(sampledTokens)
+
+            // Read results
+            var count: Int32 = 0
+            let sortedSlots = engine.batchSlots.sorted { $0.value < $1.value }
+            for (rid, slotIdx) in sortedSlots {
+                let tokenId = sampledTokens[slotIdx].item(Int.self)
+                engine.batchTokens[slotIdx] = tokenId
+                reqIds[Int(count)] = strdup(rid)
+                outTokens[Int(count)] = Int32(tokenId)
+                count += 1
+            }
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            engine.totalDecodeTokens += count
+            engine.totalDecodeTime += elapsed
+            return count
+        }
+
+        // Semi-batched path for Qwen3 with per-request caches
         if let qwenModel = engine.model as? Qwen3Model {
-            // Collect tokens and caches from all sessions
             var tokens: [Int] = []
             var allCaches: [[KVCache]] = []
             var activeRids: [String] = []
 
             for rid in rids {
                 guard let session = engine.sessions[rid] else { continue }
-                // Read previous token value (this was set by prior step)
                 let tokenId = session.iterator.y.tokens.item(Int.self)
                 tokens.append(tokenId)
                 allCaches.append(session.iterator.cache)
@@ -353,25 +393,19 @@ public func vsm_engine_decode_all(
 
             guard !tokens.isEmpty else { return Int32(0) }
 
-            // Single batched forward: [B, 1] through model
             let inputBatch = MLXArray(tokens).reshaped(tokens.count, 1)
             let logitsBatch = qwenModel.batchedDecode(inputBatch, caches: allCaches)
-            // logitsBatch: [B, 1, vocab]
 
-            // Sample each request
             var count: Int32 = 0
             for (idx, rid) in activeRids.enumerated() {
                 guard var session = engine.sessions[rid] else { continue }
-
-                let logits = logitsBatch[idx, -1, 0...]  // [vocab]
+                let logits = logitsBatch[idx, -1, 0...]
                 let newToken = session.iterator.sampler.sample(logits: logits)
                 eval(newToken)
-
                 let tokenId = newToken.item(Int.self)
                 session.iterator.y = .init(tokens: newToken)
                 session.iterator.tokenCount += 1
                 engine.sessions[rid] = session
-
                 reqIds[Int(count)] = strdup(rid)
                 outTokens[Int(count)] = Int32(tokenId)
                 count += 1
@@ -413,6 +447,81 @@ public func vsm_engine_decode_all(
         engine.totalDecodeTokens += count
         engine.totalDecodeTime += elapsed
         return count
+    }
+}
+
+/// Initialize batched KV caches and prefill all requests for fully batched decode.
+/// Must be called AFTER all prefill_req calls. Copies cache state into BatchedKVCache.
+@_cdecl("vsm_engine_init_batched")
+public func vsm_engine_init_batched(_ handle: UnsafeMutableRawPointer?) -> Int32 {
+    guard let handle else { return 0 }
+
+    return engineQueue.sync {
+        guard let engine = engines[handle] else { return Int32(0) }
+        guard let qwenModel = engine.model as? Qwen3Model else { return Int32(-1) }
+
+        let rids = Array(engine.sessions.keys)
+        let B = rids.count
+        guard B > 0 else { return Int32(0) }
+
+        // Get model dimensions from first session's cache
+        guard let firstSession = engine.sessions[rids[0]] else { return Int32(0) }
+        let numLayers = firstSession.iterator.cache.count
+        guard numLayers > 0 else { return Int32(0) }
+
+        // Determine KV heads and head dim from first cache
+        guard let firstCache = firstSession.iterator.cache[0] as? KVCacheSimple,
+              let firstKeys = firstCache.peek()?.0 else { return Int32(0) }
+        let kvHeads = firstKeys.dim(1)
+        let headDim = firstKeys.dim(3)
+        let maxSeq = 2048
+
+        // Create BatchedKVCache per layer
+        var bCaches = [BatchedKVCache]()
+        for _ in 0..<numLayers {
+            bCaches.append(BatchedKVCache(
+                maxBatch: max(B, 64), kvHeads: kvHeads, headDim: headDim,
+                maxSeq: maxSeq, dtype: firstKeys.dtype
+            ))
+        }
+
+        // Copy each request's cache into the batched cache
+        engine.batchSlots.removeAll()
+        engine.batchTokens = Array(repeating: 0, count: max(B, 64))
+
+        for (slotIdx, rid) in rids.enumerated() {
+            guard let session = engine.sessions[rid] else { continue }
+            engine.batchSlots[rid] = slotIdx
+
+            // Copy last generated token
+            let tokenId = session.iterator.y.tokens.item(Int.self)
+            engine.batchTokens[slotIdx] = tokenId
+
+            // Copy KV cache data per layer
+            for layerIdx in 0..<numLayers {
+                let cache = session.iterator.cache[layerIdx]
+                let offset = cache.offset
+                if let (k, v) = cache.peek() {
+                    // k, v: [1, kvHeads, offset, headDim]
+                    bCaches[layerIdx].keys[slotIdx, 0..., ..<offset, 0...] = k[0]
+                    bCaches[layerIdx].values[slotIdx, 0..., ..<offset, 0...] = v[0]
+                }
+                bCaches[layerIdx].offsets[slotIdx] = offset
+                bCaches[layerIdx].active = max(bCaches[layerIdx].active, slotIdx + 1)
+            }
+        }
+
+        // Materialize the cache copies
+        var toEval = [MLXArray]()
+        for c in bCaches {
+            toEval.append(c.keys)
+            toEval.append(c.values)
+        }
+        eval(toEval)
+
+        engine.batchedCaches = bCaches
+        print("[vsm] Batched KV cache initialized: B=\(B), layers=\(numLayers), kvHeads=\(kvHeads), headDim=\(headDim)")
+        return Int32(B)
     }
 }
 
