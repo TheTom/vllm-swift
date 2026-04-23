@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A native Swift/Metal backend for vLLM on Apple Silicon.<br>
+  A native Swift/Metal backend for <a href="https://github.com/vllm-project/vllm">vLLM</a> on Apple Silicon.<br>
   <b>No Python in the inference hot path.</b>
 </p>
 
@@ -79,7 +79,7 @@ Decode output tok/s. Prompt=18 tokens, generation=50 tokens (short-context decod
 The entire forward pass runs in Swift/Metal. Python is used only for orchestration.
 
 ```
-Python (vLLM API, tokenization, scheduling)
+Python (vLLM API, tokenization, scheduling)  ← github.com/vllm-project/vllm
   ↓ ctypes FFI
 C bridge (bridge.h)
   ↓ @_cdecl
