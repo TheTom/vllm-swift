@@ -16,3 +16,19 @@ swift_metal = "vllm_swift_metal:register"
 
 [tool.setuptools.packages.find]
 include = ["vllm_swift_metal*"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["vllm_swift_metal"]
+
+[tool.coverage.report]
+fail_under = 95
