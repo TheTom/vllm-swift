@@ -56,9 +56,12 @@ export DYLD_LIBRARY_PATH="$PREFIX/lib:${DYLD_LIBRARY_PATH:-}"
 VENV_DIR="$HOME/.vllm-swift/venv"
 
 _find_python() {
-  # Prefer python3.12+, fall back to python3
+  # Prefer python3.12+, check PATH then common install locations
   for p in python3.14 python3.13 python3.12 python3.11 python3.10; do
     if command -v "$p" &>/dev/null; then echo "$p"; return; fi
+    for dir in /opt/homebrew/bin /usr/local/bin; do
+      if [ -x "$dir/$p" ]; then echo "$dir/$p"; return; fi
+    done
   done
   # Check system python3 version
   local ver=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
