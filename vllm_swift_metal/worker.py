@@ -235,27 +235,26 @@ class SwiftMetalWorker:
                 sampled_token_ids.append([])
             req_ids.append(req_id)
 
-        # Handle empty scheduler step (cleanup only)
-        if not req_ids and not scheduler_output.finished_req_ids:
-            return ModelRunnerOutput(
-                req_ids=[],
-                req_id_to_index={},
-                sampled_token_ids=[],
-            )
-
         # Clean up finished requests (free Swift KV cache)
         for req_id in scheduler_output.finished_req_ids:
             self._active_requests.pop(req_id, None)
             self._request_params.pop(req_id, None)
             self.engine.finish_req(req_id)
 
-        # Stash output for sample_tokens (matches vLLM's async pattern)
-        self._pending_output = ModelRunnerOutput(
+        output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
             sampled_token_ids=sampled_token_ids,
         )
-        return None  # signal that sample_tokens will provide the output
+
+        # If tokens were generated, use the two-phase pattern
+        # (execute_model returns None, sample_tokens returns output).
+        # If this is a cleanup-only step (no tokens), return directly
+        # so the batch queue doesn't call sample_tokens.
+        if req_ids:
+            self._pending_output = output
+            return None
+        return output
 
     def sample_tokens(self, grammar_output: GrammarOutput | None) -> ModelRunnerOutput | None:
         """Return the output computed by execute_model."""
