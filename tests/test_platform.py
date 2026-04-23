@@ -4,18 +4,24 @@
 import platform
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestSwiftMetalPlatform:
     def test_is_available_on_apple_silicon(self):
         from vllm_swift.platform import SwiftMetalPlatform
 
-        with (
-            patch("platform.machine", return_value="arm64"),
-            patch("platform.system", return_value="Darwin"),
-        ):
-            # Depends on actual MLX availability — skip if not macOS
-            if platform.system() == "Darwin" and platform.machine() == "arm64":
-                assert SwiftMetalPlatform.is_available()
+        # Only assert available if MLX is actually installed
+        try:
+            import mlx.core as mx
+            has_mlx = mx.metal.is_available()
+        except (ImportError, AttributeError):
+            has_mlx = False
+
+        if has_mlx:
+            assert SwiftMetalPlatform.is_available()
+        else:
+            pytest.skip("MLX not available on this machine")
 
     def test_not_available_on_x86(self):
         from vllm_swift.platform import SwiftMetalPlatform
