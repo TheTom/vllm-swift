@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SWIFT_DIR="$PROJECT_DIR/swift"
 BOTTLE_DIR="/tmp/vllm-swift-bottle/vllm-swift/$VERSION"
-BOTTLE_TAR="vllm-swift--${VERSION}.arm64_sequoia.bottle.tar.gz"
+BOTTLE_TAR="vllm-swift-${VERSION}.arm64_sequoia.bottle.tar.gz"
 
 echo "=== Building vllm-swift bottle v${VERSION} ==="
 echo ""
