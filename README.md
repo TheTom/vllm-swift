@@ -2,25 +2,25 @@
 
 Native Swift/Metal backend for vLLM on Apple Silicon. No Python in the inference hot path.
 
-## Performance (M5 Max 128GB, debug build)
+## Performance (M5 Max 128GB)
 
-All numbers measured on the same hardware. vllm-swift uses the Swift/Metal path. vllm-metal uses the Python/MLX path with paged attention Metal kernels.
+All numbers measured on the same hardware. vllm-swift uses the Swift/Metal path (release build). vllm-metal uses the Python/MLX path with paged attention Metal kernels.
 
 ### Qwen3-0.6B (decode output tok/s)
 
-| | Single request | 8 concurrent | 32 concurrent |
-|---|:---:|:---:|:---:|
-| **vllm-swift** | **155.6** | **790.9** | **2,075** |
-| vllm-metal (Python) | 78.3 | 788.5 | 2,367 |
+| | Single | 8 concurrent | 32 concurrent | 64 concurrent |
+|---|:---:|:---:|:---:|:---:|
+| **vllm-swift** | **575.8** | **1,567** | **2,922** | **3,408** |
+| vllm-metal (Python) | 78.3 | 788.5 | 2,367 | — |
 
 ### Qwen3-4B (decode output tok/s)
 
-| | Single request | 8 concurrent | 32 concurrent |
-|---|:---:|:---:|:---:|
-| **vllm-swift** | **116.3** | **388.7** | **1,041** |
-| vllm-metal (Python) | 5.3* | — | — |
+| | Single | 8 concurrent | 32 concurrent | 64 concurrent |
+|---|:---:|:---:|:---:|:---:|
+| **vllm-swift** | **178.8** | **482.2** | **1,207** | **1,533** |
+| vllm-metal (Python) | 5.3* | — | — | — |
 
-\*vllm-metal 7B number shown (no 4B test available). The Python hot-path overhead dominates at larger model sizes.
+\*vllm-metal 7B number shown (no 4B test available).
 
 ## Architecture
 
