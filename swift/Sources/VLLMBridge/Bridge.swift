@@ -8,7 +8,7 @@ import Foundation
 import MLX
 import MLXNN
 import MLXLMCommon
-import MLXLLM
+@_exported import MLXLLM
 // HuggingFace macros require the full HF SDK. For now, load models
 // from local directories (Python downloads via huggingface_hub first).
 
@@ -317,9 +317,8 @@ public func vsm_engine_decode_step_req(
     }
 }
 
-/// Batch decode with two-phase GPU batching.
-/// Phase 1: stepAsync() on all sessions (builds graphs, no GPU sync).
-/// Phase 2: readToken() on all sessions (batched GPU sync).
+/// Batch decode: all active sessions in one batched forward pass.
+/// Projections + MLP batched across B requests, attention per-request.
 @_cdecl("vsm_engine_decode_all")
 public func vsm_engine_decode_all(
     _ handle: UnsafeMutableRawPointer?,
@@ -334,8 +333,57 @@ public func vsm_engine_decode_all(
 
         let start = CFAbsoluteTimeGetCurrent()
         let rids = Array(engine.sessions.keys.prefix(Int(maxReqs)))
+        guard !rids.isEmpty else { return Int32(0) }
 
-        // Phase 1: build all forward graphs (no GPU sync)
+        // Try batched path if model supports it
+        if let qwenModel = engine.model as? Qwen3Model {
+            // Collect tokens and caches from all sessions
+            var tokens: [Int] = []
+            var allCaches: [[KVCache]] = []
+            var activeRids: [String] = []
+
+            for rid in rids {
+                guard let session = engine.sessions[rid] else { continue }
+                // Read previous token value (this was set by prior step)
+                let tokenId = session.iterator.y.tokens.item(Int.self)
+                tokens.append(tokenId)
+                allCaches.append(session.iterator.cache)
+                activeRids.append(rid)
+            }
+
+            guard !tokens.isEmpty else { return Int32(0) }
+
+            // Single batched forward: [B, 1] through model
+            let inputBatch = MLXArray(tokens).reshaped(tokens.count, 1)
+            let logitsBatch = qwenModel.batchedDecode(inputBatch, caches: allCaches)
+            // logitsBatch: [B, 1, vocab]
+
+            // Sample each request
+            var count: Int32 = 0
+            for (idx, rid) in activeRids.enumerated() {
+                guard var session = engine.sessions[rid] else { continue }
+
+                let logits = logitsBatch[idx, -1, 0...]  // [vocab]
+                let newToken = session.iterator.sampler.sample(logits: logits)
+                eval(newToken)
+
+                let tokenId = newToken.item(Int.self)
+                session.iterator.y = .init(tokens: newToken)
+                session.iterator.tokenCount += 1
+                engine.sessions[rid] = session
+
+                reqIds[Int(count)] = strdup(rid)
+                outTokens[Int(count)] = Int32(tokenId)
+                count += 1
+            }
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            engine.totalDecodeTokens += count
+            engine.totalDecodeTime += elapsed
+            return count
+        }
+
+        // Fallback: sequential stepAsync/readToken for non-Qwen3 models
         var stepped: [String] = []
         for rid in rids {
             guard var session = engine.sessions[rid] else { continue }
@@ -345,7 +393,6 @@ public func vsm_engine_decode_all(
             engine.sessions[rid] = session
         }
 
-        // Phase 2: read all tokens (GPU batches the sync)
         var count: Int32 = 0
         for rid in stepped {
             guard var session = engine.sessions[rid] else { continue }
@@ -356,7 +403,6 @@ public func vsm_engine_decode_all(
             count += 1
         }
 
-        // Finished sessions
         for rid in rids where !stepped.contains(rid) {
             reqIds[Int(count)] = strdup(rid)
             outTokens[Int(count)] = -1
