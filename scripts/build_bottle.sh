@@ -56,8 +56,8 @@ export DYLD_LIBRARY_PATH="$PREFIX/lib:${DYLD_LIBRARY_PATH:-}"
 VENV_DIR="$HOME/.vllm-swift/venv"
 
 _find_python() {
-  # Prefer python3.12+, check PATH then common install locations
-  for p in python3.14 python3.13 python3.12 python3.11 python3.10; do
+  # Prefer python3.12 (vLLM supports 3.10-3.13). Avoid 3.14+ (too new).
+  for p in python3.12 python3.13 python3.11 python3.10; do
     if command -v "$p" &>/dev/null; then echo "$p"; return; fi
     for dir in /opt/homebrew/bin /usr/local/bin; do
       if [ -x "$dir/$p" ]; then echo "$dir/$p"; return; fi
@@ -83,7 +83,10 @@ _ensure_venv() {
     "$PYTHON" -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install -q torch --index-url https://download.pytorch.org/whl/cpu
     "$VENV_DIR/bin/pip" install -q "vllm>=0.19.0"
-    "$VENV_DIR/bin/pip" install -q -e "$PREFIX/libexec"
+    # Install plugin — use editable if pyproject.toml exists, otherwise just add to path
+    if [ -f "$PREFIX/libexec/pyproject.toml" ]; then
+      cd "$PREFIX/libexec" && "$VENV_DIR/bin/pip" install -q . && cd -
+    fi
     echo "Setup complete."
   fi
 }
