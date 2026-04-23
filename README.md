@@ -253,7 +253,16 @@ rm -rf ~/.vllm-swift/venv
 vllm-swift setup
 ```
 
-**vLLM build error (Apple Clang parentheses):** Our install script handles this automatically. If you're installing vLLM manually, pass `CFLAGS="-Wno-parentheses" pip install vllm`.
+**vLLM build error (Apple Clang parentheses):** Our install script and brew wrapper handle this automatically. If you're on an older bottle or installing vLLM manually:
+```bash
+# Brew users: get the latest bottle first
+brew uninstall vllm-swift && brew untap TheTom/tap
+rm -rf $(brew --cache)/downloads/*vllm* ~/.vllm-swift/venv
+brew tap TheTom/tap && brew install vllm-swift && vllm-swift setup
+
+# Or install vLLM manually with the fix
+CFLAGS="-Wno-parentheses" pip install vllm
+```
 
 **activate.sh not found:** Make sure you run `./install.sh` (or `./scripts/install.sh`) first — it generates `activate.sh` in the project root.
 
