@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for Swift Metal platform detection and configuration."""
 
-import platform
 from unittest.mock import MagicMock, patch
 
 import pytest
