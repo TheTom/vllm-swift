@@ -34,6 +34,17 @@ Swift (mlx-swift-lm, BatchedKVCache, batched decode)
 Metal GPU
 ```
 
+## Features
+
+- OpenAI-compatible API (`/v1/completions`, `/v1/chat/completions`)
+- Streaming (SSE) responses
+- Chat templates (applied by vLLM, model-specific)
+- Batched concurrent decode with `BatchedKVCache`
+- Auto model download from HuggingFace Hub
+- TurboQuant KV cache support (`turbo3`, `turbo4`) via mlx-swift-lm
+- Greedy and temperature sampling
+- EOS / stop token detection (vLLM scheduler)
+
 ## Quick Start
 
 ```bash
