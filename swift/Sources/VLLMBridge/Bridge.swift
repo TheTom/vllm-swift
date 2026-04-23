@@ -42,15 +42,22 @@ private struct StubTokenizer: Tokenizer {
 
 // MARK: - Engine state
 
-/// Holds all state for a single inference session.
+/// Per-request session state (KV cache + iterator).
+struct RequestSession {
+    var iterator: TokenIterator
+    var temperature: Float
+    var topP: Float
+}
+
+/// Holds model + all active request sessions.
 final class InferenceEngine {
     let model: any LanguageModel
     let tokenizer: any Tokenizer
     let configuration: ModelConfiguration
 
-    var iterator: TokenIterator?
+    /// Active sessions keyed by request ID (supports concurrent requests)
+    var sessions: [String: RequestSession] = [:]
     var generateParams: GenerateParameters
-    var lastLogits: MLXArray?
 
     // Perf tracking
     var prefillTokensPerSec: Double = 0
@@ -205,6 +212,8 @@ public func vsm_engine_model_memory_bytes(_ handle: UnsafeMutableRawPointer?) ->
     return Int64(Memory.activeMemory)
 }
 
+// Single-request API (backward compat — uses "_default" session)
+
 @_cdecl("vsm_engine_prefill")
 public func vsm_engine_prefill(
     _ handle: UnsafeMutableRawPointer?,
@@ -213,16 +222,42 @@ public func vsm_engine_prefill(
     temperature: Float,
     topP: Float
 ) -> Int32 {
-    guard let handle, let promptTokens else { return -1 }
+    return vsm_engine_prefill_req(
+        handle, reqId: "_default",
+        promptTokens: promptTokens, numTokens: numTokens,
+        temperature: temperature, topP: topP
+    )
+}
+
+@_cdecl("vsm_engine_decode_step")
+public func vsm_engine_decode_step(
+    _ handle: UnsafeMutableRawPointer?,
+    temperature: Float,
+    topP: Float
+) -> Int32 {
+    return vsm_engine_decode_step_req(handle, reqId: "_default")
+}
+
+// Multi-request API
+
+@_cdecl("vsm_engine_prefill_req")
+public func vsm_engine_prefill_req(
+    _ handle: UnsafeMutableRawPointer?,
+    reqId: UnsafePointer<CChar>?,
+    promptTokens: UnsafePointer<Int32>?,
+    numTokens: Int32,
+    temperature: Float,
+    topP: Float
+) -> Int32 {
+    guard let handle, let promptTokens, let reqId else { return -1 }
+    let rid = String(cString: reqId)
 
     return engineQueue.sync {
         guard let engine = engines[handle] else { return Int32(-1) }
 
-        // Build token array
         let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
         let tokenArray = MLXArray(tokens)
 
-        // Update sampling params for this call
         var params = engine.generateParams
         params.temperature = temperature
         params.topP = topP
@@ -235,39 +270,42 @@ public func vsm_engine_prefill(
                 parameters: params
             )
 
-            // Get first token (prefill happens inside TokenIterator.init)
             guard let firstToken = iterator.next() else {
                 return Int32(-1)
             }
 
-            engine.iterator = iterator
+            engine.sessions[rid] = RequestSession(
+                iterator: iterator,
+                temperature: temperature,
+                topP: topP
+            )
             return Int32(firstToken)
         } catch {
-            print("[vsm] Prefill error: \(error)")
+            print("[vsm] Prefill error for \(rid): \(error)")
             return Int32(-1)
         }
     }
 }
 
-@_cdecl("vsm_engine_decode_step")
-public func vsm_engine_decode_step(
+@_cdecl("vsm_engine_decode_step_req")
+public func vsm_engine_decode_step_req(
     _ handle: UnsafeMutableRawPointer?,
-    temperature: Float,
-    topP: Float
+    reqId: UnsafePointer<CChar>?
 ) -> Int32 {
-    guard let handle else { return -1 }
+    guard let handle, let reqId else { return -1 }
+    let rid = String(cString: reqId)
 
     return engineQueue.sync {
         guard let engine = engines[handle],
-              var iterator = engine.iterator else { return Int32(-1) }
+              var session = engine.sessions[rid] else { return Int32(-1) }
 
         let start = CFAbsoluteTimeGetCurrent()
-        guard let token = iterator.next() else {
+        guard let token = session.iterator.next() else {
             return Int32(-1)
         }
         let elapsed = CFAbsoluteTimeGetCurrent() - start
 
-        engine.iterator = iterator
+        engine.sessions[rid] = session
         engine.totalDecodeTokens += 1
         engine.totalDecodeTime += elapsed
         engine.peakMemoryBytes = max(
@@ -276,6 +314,29 @@ public func vsm_engine_decode_step(
         )
 
         return Int32(token)
+    }
+}
+
+@_cdecl("vsm_engine_finish_req")
+public func vsm_engine_finish_req(
+    _ handle: UnsafeMutableRawPointer?,
+    reqId: UnsafePointer<CChar>?
+) {
+    guard let handle, let reqId else { return }
+    let rid = String(cString: reqId)
+
+    engineQueue.sync {
+        guard let engine = engines[handle] else { return }
+        engine.sessions.removeValue(forKey: rid)
+    }
+}
+
+@_cdecl("vsm_engine_active_requests")
+public func vsm_engine_active_requests(_ handle: UnsafeMutableRawPointer?) -> Int32 {
+    guard let handle else { return 0 }
+    return engineQueue.sync {
+        guard let engine = engines[handle] else { return Int32(0) }
+        return Int32(engine.sessions.count)
     }
 }
 
@@ -292,20 +353,20 @@ public func vsm_engine_decode_batch(
 
     return engineQueue.sync {
         guard let engine = engines[handle],
-              var iterator = engine.iterator else { return Int32(0) }
+              var session = engine.sessions["_default"] else { return Int32(0) }
 
         let limit = min(Int(maxTokens), Int(outputCapacity))
         var count: Int32 = 0
 
         let start = CFAbsoluteTimeGetCurrent()
         for i in 0..<limit {
-            guard let token = iterator.next() else { break }
+            guard let token = session.iterator.next() else { break }
             outputTokens[i] = Int32(token)
             count += 1
         }
         let elapsed = CFAbsoluteTimeGetCurrent() - start
 
-        engine.iterator = iterator
+        engine.sessions["_default"] = session
         engine.totalDecodeTokens += count
         engine.totalDecodeTime += elapsed
         engine.peakMemoryBytes = max(
@@ -332,8 +393,7 @@ public func vsm_engine_reset(_ handle: UnsafeMutableRawPointer?) {
     guard let handle else { return }
     engineQueue.sync {
         guard let engine = engines[handle] else { return }
-        engine.iterator = nil
-        engine.lastLogits = nil
+        engine.sessions.removeAll()
     }
 }
 

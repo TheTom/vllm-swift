@@ -37,9 +37,6 @@ int32_t vsm_engine_head_dim(vsm_engine_t engine);
 int64_t vsm_engine_model_memory_bytes(vsm_engine_t engine);
 
 // Prefill: process prompt tokens, return first generated token
-// prompt_tokens: array of token IDs
-// num_tokens: length of prompt_tokens
-// Returns: first generated token ID, or -1 on error
 int32_t vsm_engine_prefill(
     vsm_engine_t engine,
     const int32_t* prompt_tokens,
@@ -49,12 +46,36 @@ int32_t vsm_engine_prefill(
 );
 
 // Decode: generate next token from current KV cache state
-// Returns: next token ID, or -1 on error (e.g. EOS)
 int32_t vsm_engine_decode_step(
     vsm_engine_t engine,
     float temperature,
     float top_p
 );
+
+// Multi-request API: prefill with request ID
+int32_t vsm_engine_prefill_req(
+    vsm_engine_t engine,
+    const char* req_id,
+    const int32_t* prompt_tokens,
+    int32_t num_tokens,
+    float temperature,
+    float top_p
+);
+
+// Multi-request API: decode step for specific request
+int32_t vsm_engine_decode_step_req(
+    vsm_engine_t engine,
+    const char* req_id
+);
+
+// Multi-request API: finish and free a request's KV cache
+void vsm_engine_finish_req(
+    vsm_engine_t engine,
+    const char* req_id
+);
+
+// Get number of active requests
+int32_t vsm_engine_active_requests(vsm_engine_t engine);
 
 // Batch decode: generate N tokens, write to output buffer
 // Returns: number of tokens actually generated

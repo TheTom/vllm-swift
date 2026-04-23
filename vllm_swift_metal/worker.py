@@ -207,33 +207,26 @@ class SwiftMetalWorker:
         sampled_token_ids: list[list[int]] = []
         req_ids: list[str] = []
 
-        # Handle new requests (prefill)
+        # Handle new requests (prefill) — each gets its own session
         for new_req in scheduler_output.scheduled_new_reqs:
             req_id = new_req.req_id
             prompt_tokens = list(new_req.prompt_token_ids)
-
-            # Get sampling params
             temp = getattr(new_req.sampling_params, "temperature", 0.0)
             top_p = getattr(new_req.sampling_params, "top_p", 1.0)
 
-            # Reset engine for new request (single-request mode for now)
-            self.engine.reset()
-            first_token = self.engine.prefill(prompt_tokens, temperature=temp, top_p=top_p)
+            first_token = self.engine.prefill_req(
+                req_id, prompt_tokens, temperature=temp, top_p=top_p
+            )
 
             self._active_requests[req_id] = [first_token]
             self._request_params[req_id] = {"temperature": temp, "top_p": top_p}
             req_ids.append(req_id)
             sampled_token_ids.append([first_token])
 
-        # Handle cached requests (decode)
+        # Handle cached requests (decode step per request)
         cached = scheduler_output.scheduled_cached_reqs
         for req_id in cached.req_ids:
-            params = self._request_params.get(req_id, {})
-
-            token = self.engine.decode_step(
-                temperature=params.get("temperature", 0.0),
-                top_p=params.get("top_p", 1.0),
-            )
+            token = self.engine.decode_step_req(req_id)
 
             if token >= 0:
                 self._active_requests.setdefault(req_id, []).append(token)
@@ -250,10 +243,11 @@ class SwiftMetalWorker:
                 sampled_token_ids=[],
             )
 
-        # Clean up finished requests
+        # Clean up finished requests (free Swift KV cache)
         for req_id in scheduler_output.finished_req_ids:
             self._active_requests.pop(req_id, None)
             self._request_params.pop(req_id, None)
+            self.engine.finish_req(req_id)
 
         # Stash output for sample_tokens (matches vLLM's async pattern)
         self._pending_output = ModelRunnerOutput(

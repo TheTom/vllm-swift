@@ -166,6 +166,38 @@ class TestSwiftInferenceEngine:
         mock_lib.vsm_engine_destroy.assert_called_once_with(0xDEAD)
         assert engine._handle is None
 
+    def test_prefill_req(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_prefill_req.return_value = 77
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0x1234
+        assert engine.prefill_req("req-1", [1, 2, 3]) == 77
+
+    def test_decode_step_req(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_decode_step_req.return_value = 88
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0x1234
+        assert engine.decode_step_req("req-1") == 88
+
+    def test_finish_req(self):
+        mock_lib = MagicMock()
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0x1234
+        engine.finish_req("req-1")
+        mock_lib.vsm_engine_finish_req.assert_called_once()
+
+    def test_active_requests(self):
+        mock_lib = MagicMock()
+        mock_lib.vsm_engine_active_requests.return_value = 5
+        engine = SwiftInferenceEngine.__new__(SwiftInferenceEngine)
+        engine._lib = mock_lib
+        engine._handle = 0x1234
+        assert engine.active_requests() == 5
+
     def test_kv_scheme_passed_to_bridge(self):
         mock_lib = MagicMock()
         mock_lib.vsm_engine_create.return_value = 0x1

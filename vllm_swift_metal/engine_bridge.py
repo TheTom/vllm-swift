@@ -92,6 +92,26 @@ def _get_lib():
         ctypes.POINTER(ctypes.c_int32),
     ]
 
+    # Multi-request API
+    _lib.vsm_engine_prefill_req.restype = ctypes.c_int32
+    _lib.vsm_engine_prefill_req.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.c_int32,
+        ctypes.c_float,
+        ctypes.c_float,
+    ]
+    _lib.vsm_engine_decode_step_req.restype = ctypes.c_int32
+    _lib.vsm_engine_decode_step_req.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+    ]
+    _lib.vsm_engine_finish_req.restype = None
+    _lib.vsm_engine_finish_req.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _lib.vsm_engine_active_requests.restype = ctypes.c_int32
+    _lib.vsm_engine_active_requests.argtypes = [ctypes.c_void_p]
+
     # State management
     _lib.vsm_engine_reset.restype = None
     _lib.vsm_engine_reset.argtypes = [ctypes.c_void_p]
@@ -154,6 +174,23 @@ class SwiftInferenceEngine:
             self._handle, max_tokens, temperature, top_p, buf, max_tokens
         )
         return list(buf[:n])
+
+    def prefill_req(
+        self, req_id: str, prompt_tokens: list[int], temperature: float = 0.0, top_p: float = 1.0
+    ) -> int:
+        arr = (ctypes.c_int32 * len(prompt_tokens))(*prompt_tokens)
+        return self._lib.vsm_engine_prefill_req(
+            self._handle, req_id.encode(), arr, len(prompt_tokens), temperature, top_p
+        )
+
+    def decode_step_req(self, req_id: str) -> int:
+        return self._lib.vsm_engine_decode_step_req(self._handle, req_id.encode())
+
+    def finish_req(self, req_id: str) -> None:
+        self._lib.vsm_engine_finish_req(self._handle, req_id.encode())
+
+    def active_requests(self) -> int:
+        return self._lib.vsm_engine_active_requests(self._handle)
 
     def reset(self) -> None:
         self._lib.vsm_engine_reset(self._handle)

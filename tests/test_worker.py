@@ -168,7 +168,7 @@ class TestSwiftMetalWorker:
     def test_execute_model_with_mock_engine(self):
         worker = self._make_worker()
         mock_engine = MagicMock()
-        mock_engine.prefill.return_value = 42
+        mock_engine.prefill_req.return_value = 42
         mock_engine.num_layers = 28
         mock_engine.head_dim = 128
         worker.engine = mock_engine
@@ -190,13 +190,12 @@ class TestSwiftMetalWorker:
         assert output is not None
         assert output.req_ids == ["req-001"]
         assert output.sampled_token_ids == [[42]]
-        mock_engine.reset.assert_called_once()
-        mock_engine.prefill.assert_called_once()
+        mock_engine.prefill_req.assert_called_once()
 
     def test_execute_model_decode_step(self):
         worker = self._make_worker()
         mock_engine = MagicMock()
-        mock_engine.decode_step.return_value = 99
+        mock_engine.decode_step_req.return_value = 99
         worker.engine = mock_engine
         worker._active_requests["req-001"] = [42]
         worker._request_params["req-001"] = {"temperature": 0.0, "top_p": 1.0}
@@ -296,7 +295,7 @@ class TestSwiftMetalWorker:
     def test_decode_step_negative_token(self):
         worker = self._make_worker()
         mock_engine = MagicMock()
-        mock_engine.decode_step.return_value = -1
+        mock_engine.decode_step_req.return_value = -1
         worker.engine = mock_engine
         worker._active_requests["req-eos"] = [42]
         worker._request_params["req-eos"] = {}
