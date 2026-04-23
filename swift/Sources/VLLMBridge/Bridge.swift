@@ -137,44 +137,40 @@ public func vsm_engine_create(
         Memory.cacheLimit = limit
     }
 
-    // Load model synchronously (nonisolated(unsafe) for C bridge context)
-    nonisolated(unsafe) var loadedContext: ModelContext?
-    nonisolated(unsafe) var loadError: (any Error)?
+    // Load model synchronously. Use a box to pass results across the
+    // Task boundary without triggering Swift 6.2 SendingRisksDataRace.
+    final class LoadResult: @unchecked Sendable {
+        var context: ModelContext?
+        var error: (any Error)?
+    }
+    let result = LoadResult()
     let semaphore = DispatchSemaphore(value: 0)
+    let modelURL = URL(fileURLWithPath: modelId)
 
     Task {
         do {
-            // Load from local directory. Python is responsible for
-            // downloading via huggingface_hub before calling create.
-            // modelId can be a HF cache path or direct directory.
-            // Load model from local directory. Python downloads via
-            // huggingface_hub and passes the cache path.
-            let modelURL = URL(fileURLWithPath: modelId)
             // Try LLM first, then VLM
             do {
-                let context = try await loadModel(
+                result.context = try await loadModel(
                     from: modelURL,
                     using: StubTokenizerLoader()
                 )
-                loadedContext = context
             } catch {
-                // LLM failed — try VLM
                 print("[vsm] LLM load failed, trying VLM: \(error.localizedDescription)")
-                let vlmContext = try await MLXVLM.VLMModelFactory.shared.load(
+                result.context = try await MLXVLM.VLMModelFactory.shared.load(
                     from: modelURL,
                     using: StubTokenizerLoader()
                 )
-                loadedContext = vlmContext
             }
         } catch {
-            loadError = error
+            result.error = error
         }
         semaphore.signal()
     }
     semaphore.wait()
 
-    guard let context = loadedContext else {
-        let errMsg = loadError?.localizedDescription ?? "unknown"
+    guard let context = result.context else {
+        let errMsg = result.error?.localizedDescription ?? "unknown"
         print("[vsm] Failed to load model \(modelId): \(errMsg)")
         return nil
     }
