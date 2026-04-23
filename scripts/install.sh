@@ -97,11 +97,33 @@ else
 fi
 echo ""
 
+# Find Python 3.10-3.13 (vLLM doesn't support 3.14+)
+_find_python() {
+    for p in python3.13 python3.12 python3.11 python3.10; do
+        if command -v "$p" &>/dev/null; then echo "$p"; return; fi
+        for dir in /opt/homebrew/bin /usr/local/bin; do
+            if [ -x "$dir/$p" ]; then echo "$dir/$p"; return; fi
+        done
+    done
+    local ver=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
+    if [ "${ver:-0}" -ge 10 ] && [ "${ver:-99}" -le 13 ]; then echo "python3"; return; fi
+    echo ""
+}
+
+PYTHON=$(_find_python)
+if [ -z "$PYTHON" ]; then
+    echo "ERROR: Python 3.10-3.13 required (vLLM doesn't support 3.14+ yet)."
+    echo "  Install via: brew install python@3.13"
+    echo "  or: https://www.python.org/downloads/"
+    exit 1
+fi
+echo "Using: $PYTHON ($($PYTHON --version 2>&1))"
+
 # Create venv and install Python plugin
 VENV_DIR="$PROJECT_DIR/.venv"
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating Python virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    "$PYTHON" -m venv "$VENV_DIR"
 fi
 echo "Installing Python plugin..."
 cd "$PROJECT_DIR"
