@@ -13,7 +13,7 @@ let package = Package(
     ],
     dependencies: [
         // Pinned snapshot of alpha branch with BatchedKVCache + TurboQuant+
-        // For local dev: swap to .package(path: "/Users/tom/dev/mlx-swift-lm")
+        // For local dev: .package(path: "/Users/tom/dev/mlx-swift-lm")
         .package(url: "https://github.com/TheTom/mlx-swift-lm.git", branch: "vllm-swift-stable"),
     ],
     targets: [

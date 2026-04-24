@@ -1,5 +1,5 @@
 {
-  "originHash" : "9de08de28e684dacbd73116ef3da6ab33fb2a8221d6cd295441447a42b3626a0",
+  "originHash" : "bc84c64c04bf05360b036b953264da6c3fd3a2a2552b736059f7d8a17235f4b2",
   "pins" : [
     {
       "identity" : "mlx-swift",
@@ -7,7 +7,7 @@
       "location" : "https://github.com/ekryski/mlx-swift",
       "state" : {
         "branch" : "alpha",
-        "revision" : "c92f80d7f05210a259642324cfbfc891265734a3"
+        "revision" : "8ae1a12754ea8902c1f19e9e1905e957cdcc2065"
       }
     },
     {
@@ -16,7 +16,7 @@
       "location" : "https://github.com/TheTom/mlx-swift-lm.git",
       "state" : {
         "branch" : "vllm-swift-stable",
-        "revision" : "d0f6987ec3a6d408a84ac382033183ac3fba45b8"
+        "revision" : "7e4425c7dbc8c15af590fd82c8ea490806e33417"
       }
     },
     {

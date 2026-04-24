@@ -38,7 +38,7 @@ Server running at `http://localhost:8000` (OpenAI-compatible API).
 
 ## Performance (M5 Max 128GB)
 
-Up to 2.4x higher throughput at low concurrency by removing Python from the inference hot path.
+Up to 2.6x higher throughput at low concurrency by removing Python from the inference hot path.
 
 Decode output tok/s. Prompt=18 tokens, generation=50 tokens (short-context decode benchmark), greedy.
 
@@ -48,14 +48,14 @@ Decode output tok/s. Prompt=18 tokens, generation=50 tokens (short-context decod
 
 | | Single | 8 concurrent | 32 concurrent | 64 concurrent |
 |---|:---:|:---:|:---:|:---:|
-| **vllm-swift** | **340** | **1,512** | **2,862** | **3,383** |
+| **vllm-swift** | **371** | **1,424** | **2,931** | **3,472** |
 | vllm-metal (Python/MLX) | 142 | 1,170 | 2,457 | 3,017 |
 
 ### Qwen3-4B
 
 | | Single | 8 concurrent | 32 concurrent | 64 concurrent |
 |---|:---:|:---:|:---:|:---:|
-| **vllm-swift** | **149** | **479** | **1,166** | **1,519** |
+| **vllm-swift** | **143** | **470** | **1,184** | **1,511** |
 | vllm-metal (Python/MLX) | 105 | 408 | 1,067 | 1,387 |
 
 ### [TurboQuant+](https://github.com/TheTom/turboquant_plus) KV Cache Compression
@@ -64,11 +64,11 @@ Decode output tok/s. Prompt=18 tokens, generation=50 tokens (short-context decod
 
 **Qwen3.5 2B (4-bit weights)**
 
-| KV Cache | Compression | PPL @1K | PPL @32K | Prefill @1K | Prefill @32K | Decode @1K | Decode @32K |
-|----------|:-----------:|:------:|:-------:|:----------:|:-----------:|:----------:|:-----------:|
-| FP16 | 1.0x | 2.72 | 4.40 | 11,173 tok/s | 6,903 tok/s | 264 tok/s | 157 tok/s |
-| turbo4v2 | 3.2x | 3.22 | 3.72 | 11,298 tok/s | 6,916 tok/s | 265 tok/s | 157 tok/s |
-| turbo3 | 4.6x | 3.95 | 3.89 | 11,348 tok/s | 6,958 tok/s | 264 tok/s | 157 tok/s |
+| KV Cache | Compression | Prefill @1K | Decode @1K | Prefill @4K | Decode @4K |
+|----------|:-----------:|:----------:|:----------:|:----------:|:----------:|
+| FP16 | 1.0x | 1,252 tok/s | 259 tok/s | 1,215 tok/s | 249 tok/s |
+| turbo4v2 | 3.2x | 1,331 tok/s | 255 tok/s | 1,245 tok/s | 240 tok/s |
+| turbo3 | 4.6x | 1,346 tok/s | 174 tok/s | 1,276 tok/s | 241 tok/s |
 
 ## Architecture
 
