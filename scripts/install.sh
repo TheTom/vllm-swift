@@ -162,7 +162,7 @@ echo ""
 
 # Verify installation
 echo "Verifying installation..."
-if python3 -c "from vllm_swift import register; print('  Plugin loads OK')" 2>&1; then
+if "$VENV_DIR/bin/python3" -c "from vllm_swift import register; print('  Plugin loads OK')" 2>&1; then
     echo ""
 else
     echo "  WARNING: Plugin import failed. Check Python environment."
