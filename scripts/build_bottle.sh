@@ -90,7 +90,7 @@ _ensure_venv() {
   echo "Installing PyTorch (this may take a minute)..."
   "$VENV_DIR/bin/pip" install --progress-bar on torch --index-url https://download.pytorch.org/whl/cpu
   echo "Installing vLLM (this may take a few minutes)..."
-  CFLAGS="-Wno-parentheses" "$VENV_DIR/bin/pip" install --progress-bar on "vllm>=0.19.0"
+  CFLAGS="-Wno-parentheses" CXXFLAGS="-Wno-parentheses" "$VENV_DIR/bin/pip" install --progress-bar on "vllm>=0.19.0"
   # Install plugin
   echo "Installing vllm-swift plugin..."
   if [ -f "$PREFIX/libexec/pyproject.toml" ]; then

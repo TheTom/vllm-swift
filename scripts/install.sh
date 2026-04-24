@@ -136,7 +136,7 @@ if ! "$VENV_DIR/bin/python3" -c "import vllm" 2>/dev/null; then
     echo "Installing vLLM (this may take a few minutes)..."
     # Apple Clang errors on chained comparisons in vLLM's C++ code.
     # Same workaround used by vllm-metal's install.sh.
-    CFLAGS="-Wno-parentheses" "$VENV_DIR/bin/pip" install "vllm>=0.19.0" 2>&1 | tail -10 || true
+    CFLAGS="-Wno-parentheses" CXXFLAGS="-Wno-parentheses" "$VENV_DIR/bin/pip" install "vllm>=0.19.0" 2>&1 | tail -10 || true
     if ! "$VENV_DIR/bin/python3" -c "import vllm" 2>/dev/null; then
         echo ""
         echo "WARNING: vLLM installation failed. You may need to install it manually:"
