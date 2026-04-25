@@ -11,7 +11,7 @@ class VllmSwift < Formula
   desc "Native Swift/Metal backend for vLLM on Apple Silicon"
   homepage "https://github.com/TheTom/vllm-swift"
   url "https://github.com/TheTom/vllm-swift.git", branch: "main"
-  version "0.1.0"
+  version "0.2.0"
   license "Apache-2.0"
 
   depends_on xcode: ["15.0", :build]
@@ -98,7 +98,7 @@ class VllmSwift < Formula
           exec "#{libexec}/scripts/integration_test.sh" "$@"
           ;;
         version)
-          echo "vllm-swift 0.1.0"
+          echo "vllm-swift 0.2.0"
           echo "dylib: #{lib}/libVLLMBridge.dylib"
           "$VENV_PYTHON" -c "import vllm; print(f'vLLM: {vllm.__version__}')" 2>/dev/null || true
           ;;
@@ -135,6 +135,6 @@ class VllmSwift < Formula
   test do
     assert_predicate lib/"libVLLMBridge.dylib", :exist?
     assert_match "vllm-swift", shell_output("#{bin}/vllm-swift")
-    assert_match "0.1.0", shell_output("#{bin}/vllm-swift version")
+    assert_match "0.2.0", shell_output("#{bin}/vllm-swift version")
   end
 end

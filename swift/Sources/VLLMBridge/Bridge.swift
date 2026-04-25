@@ -356,9 +356,10 @@ public func vsm_engine_prompt_logprobs(
         let tokens = (0..<n).map { Int(promptTokens[$0]) }
         let tokenArray = MLXArray(tokens)
 
-        // Run model forward on full prompt — no KV cache needed
+        // Run model forward on full prompt with proper caches for hybrid models (GDN needs MambaCache)
         let input = LMInput(text: .init(tokens: tokenArray))
-        let result = engine.model(input.text.tokens.reshaped(1, n), cache: [any KVCache]())
+        let cache: [KVCache]? = (engine.model as? LLMModel)?.newCache(parameters: nil) ?? nil
+        let result = engine.model(input.text.tokens.reshaped(1, n), cache: cache)
         // result: [1, seq_len, vocab_size]
         let logits = result.squeezed(axis: 0)  // [seq_len, vocab]
 

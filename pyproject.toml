@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-swift"
-version = "0.1.0"
+version = "0.2.0"
 description = "vLLM Metal plugin powered by mlx-swift — high-performance LLM inference on Apple Silicon"
 requires-python = ">=3.10"
 dependencies = []  # vLLM installed separately (build from source is complex)

@@ -22,4 +22,4 @@ def test_register_returns_none_when_unavailable():
 def test_version():
     from vllm_swift import __version__
 
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.2.0"
