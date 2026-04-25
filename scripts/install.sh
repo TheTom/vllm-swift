@@ -92,8 +92,20 @@ if [ -n "$MLX_METALLIB" ]; then
         echo "  Metallib already in place: $MLX_METALLIB"
     fi
 else
-    echo "  WARNING: mlx.metallib not found. MLX will compile kernels at runtime (slower first run)."
-    echo "  This is normal for first builds — MLX generates it on first use."
+    echo "  WARNING: mlx.metallib not found. Attempting to generate..."
+    # Force metallib generation by running a trivial Metal op
+    "$PYTHON" -c "
+try:
+    import mlx.core as mx; mx.eval(mx.add(mx.array([1]), mx.array([2])))
+    import os; src = os.path.join(os.path.dirname(mx.__file__), 'lib', 'mlx.metallib')
+    if os.path.exists(src):
+        import shutil; shutil.copy(src, '$BUILD_DIR/mlx.metallib'); print('  Generated and copied metallib')
+except: pass
+" 2>/dev/null
+    if [ ! -f "$BUILD_DIR/mlx.metallib" ]; then
+        echo "  WARNING: Could not generate metallib. Some models (GDN/TurboFlash) may fail."
+        echo "  To fix: pip install mlx && python3 -c 'import mlx.core; mlx.core.eval(mlx.core.array([1]))'  "
+    fi
 fi
 echo ""
 
