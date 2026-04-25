@@ -120,6 +120,15 @@ print(f'Downloaded to {p}')
     _ensure_venv
     echo "vllm-swift environment ready at $VENV_DIR"
     ;;
+  update)
+    echo "Updating vllm-swift..."
+    brew untap TheTom/tap 2>/dev/null
+    rm -rf "$(brew --cache)/downloads/"*vllm* 2>/dev/null
+    rm -rf "$HOME/.vllm-swift/venv" 2>/dev/null
+    brew tap TheTom/tap && brew reinstall vllm-swift
+    _ensure_venv
+    echo "Update complete."
+    ;;
   version)
     echo "vllm-swift 0.1.0"
     echo "dylib: $PREFIX/lib/libVLLMBridge.dylib"
@@ -132,11 +141,12 @@ print(f'Downloaded to {p}')
     echo "  vllm-swift serve <model> [args]   Start OpenAI-compatible API server"
     echo "  vllm-swift download <model-id>    Download model from HuggingFace"
     echo "  vllm-swift setup                  Set up Python environment"
+    echo "  vllm-swift update                 Update to latest version"
     echo "  vllm-swift version                Show version info"
     echo ""
     echo "Examples:"
     echo "  vllm-swift download mlx-community/Qwen3-4B-4bit"
-    echo "  vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 2048"
+    echo "  vllm-swift serve ~/models/Qwen3-4B-4bit --max-model-len 4096"
     ;;
 esac
 WRAPPER
