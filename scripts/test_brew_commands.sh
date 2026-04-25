@@ -22,6 +22,28 @@ check() {
     fi
 }
 
+echo "=== Script syntax checks ==="
+echo ""
+
+# Test: install.sh has valid bash syntax
+bash -n scripts/install.sh 2>/dev/null \
+    && check "install.sh syntax valid" 0 || check "install.sh syntax valid" 1
+
+# Test: install.sh doesn't use $PYTHON before _find_python defines it
+# (caught a real bug where $PYTHON was used at line 97 before line 125)
+FIRST_USE=$(grep -n '"\$PYTHON"' scripts/install.sh | head -1 | cut -d: -f1)
+DEFINITION=$(grep -n 'PYTHON=\$(_find_python)' scripts/install.sh | head -1 | cut -d: -f1)
+if [ -n "$FIRST_USE" ] && [ -n "$DEFINITION" ] && [ "$FIRST_USE" -ge "$DEFINITION" ]; then
+    check "\$PYTHON used after definition (use=$FIRST_USE def=$DEFINITION)" 0
+else
+    check "\$PYTHON used after definition (use=$FIRST_USE def=$DEFINITION)" 1
+fi
+
+# Test: build_bottle.sh has valid bash syntax
+bash -n scripts/build_bottle.sh 2>/dev/null \
+    && check "build_bottle.sh syntax valid" 0 || check "build_bottle.sh syntax valid" 1
+
+echo ""
 echo "=== vllm-swift wrapper tests ==="
 echo ""
 
