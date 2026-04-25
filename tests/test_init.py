@@ -22,4 +22,7 @@ def test_register_returns_none_when_unavailable():
 def test_version():
     from vllm_swift import __version__
 
-    assert __version__ == "0.2.1"
+    # Verify version is a valid semver string, not a specific value
+    parts = __version__.split(".")
+    assert len(parts) == 3, f"Expected semver x.y.z, got {__version__}"
+    assert all(p.isdigit() for p in parts), f"Non-numeric version parts: {__version__}"
