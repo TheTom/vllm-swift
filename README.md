@@ -218,6 +218,12 @@ brew tap TheTom/tap && brew install vllm-swift
 
 Prebuilt bottle — no Swift toolchain needed. First run of `vllm-swift serve` sets up a managed Python environment automatically.
 
+To update to the latest version:
+
+```bash
+vllm-swift update
+```
+
 ### From source
 
 ```bash
