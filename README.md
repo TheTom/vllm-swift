@@ -205,6 +205,10 @@ vllm-swift serve <model> [options]
 
 All standard [vLLM flags](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html) work — these are just the most common ones.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Known Limitations (early development)
 
 - **LoRA** not supported (Swift engine limitation)
