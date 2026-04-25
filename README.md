@@ -268,6 +268,12 @@ CFLAGS="-Wno-parentheses" pip install vllm
 
 **activate.sh not found:** Make sure you run `./install.sh` (or `./scripts/install.sh`) first — it generates `activate.sh` in the project root.
 
+**Metal kernel not found (GDN/TurboFlash models):** The `mlx.metallib` file must be in the same directory as `libVLLMBridge.dylib`. For manual installs, copy it:
+```bash
+cp swift/.build/arm64-apple-macosx/release/mlx.metallib \
+   $(dirname $(echo $DYLD_LIBRARY_PATH | cut -d: -f1))/
+```
+
 ### Download a model
 
 ```bash
