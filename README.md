@@ -7,6 +7,11 @@
   <b>No Python in the inference hot path.</b>
 </p>
 
+<p align="center">
+  Run vLLM workloads on Apple Silicon with a native Swift/Metal hot path.<br>
+  OpenAI-compatible API. Up to 2.6× faster short-context decode.
+</p>
+
 ## Quick Start
 
 ### 1. Install
