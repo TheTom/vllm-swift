@@ -20,7 +20,16 @@ def _find_lib_path() -> str:
         base / ".build" / "arm64-apple-macosx" / "release" / "libVLLMBridge.dylib",
         base / ".build" / "arm64-apple-macosx" / "debug" / "libVLLMBridge.dylib",
         base / "libvllm_swift.dylib",
+        # Homebrew install locations
+        Path("/opt/homebrew/lib/libVLLMBridge.dylib"),
+        Path("/usr/local/lib/libVLLMBridge.dylib"),
     ]
+    # Also check DYLD_LIBRARY_PATH
+    dyld_paths = os.environ.get("DYLD_LIBRARY_PATH", "").split(":")
+    for d in dyld_paths:
+        if d:
+            candidates.append(Path(d) / "libVLLMBridge.dylib")
+
     for p in candidates:
         if p.exists():
             return str(p)

@@ -49,8 +49,9 @@ class SwiftMetalPlatform(Platform):
         # Check if the Swift bridge dylib can be loaded — that's the real requirement.
         # No Python MLX dependency needed.
         try:
-            from vllm_swift.engine_bridge import _find_lib_path
             import os
+
+            from vllm_swift.engine_bridge import _find_lib_path
 
             return os.path.exists(_find_lib_path())
         except Exception:
