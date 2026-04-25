@@ -16,7 +16,7 @@
       "location" : "https://github.com/TheTom/mlx-swift-lm.git",
       "state" : {
         "branch" : "vllm-swift-stable",
-        "revision" : "968610c5f7f2fc0602dced2bc2f9564610465b19"
+        "revision" : "a17e042553c52a125afcd54566ddc58dd6077a69"
       }
     },
     {
