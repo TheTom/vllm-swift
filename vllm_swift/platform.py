@@ -46,12 +46,15 @@ class SwiftMetalPlatform(Platform):
             return False
         if py_platform.system() != "Darwin":
             return False
+        # Check if the Swift bridge dylib can be loaded — that's the real requirement.
+        # No Python MLX dependency needed.
         try:
-            import mlx.core as mx
+            from vllm_swift.engine_bridge import _find_lib_path
+            import os
 
-            return bool(mx.metal.is_available())
-        except (ImportError, AttributeError, RuntimeError):
-            return False
+            return os.path.exists(_find_lib_path())
+        except Exception:
+            return True  # arm64 + Darwin = assume available
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
