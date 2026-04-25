@@ -222,6 +222,9 @@ To update to the latest version:
 
 ```bash
 vllm-swift update
+
+# Or via standard Homebrew (works from any version):
+brew update && brew upgrade vllm-swift
 ```
 
 ### From source
