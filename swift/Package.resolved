@@ -1,5 +1,5 @@
 {
-  "originHash" : "bc84c64c04bf05360b036b953264da6c3fd3a2a2552b736059f7d8a17235f4b2",
+  "originHash" : "5f7190f94dd2710a2a9369bde30cdb58e18cc3cc3450a3ea3b47bc9cbe7e9c14",
   "pins" : [
     {
       "identity" : "mlx-swift",
@@ -16,7 +16,7 @@
       "location" : "https://github.com/TheTom/mlx-swift-lm.git",
       "state" : {
         "branch" : "vllm-swift-stable",
-        "revision" : "7e4425c7dbc8c15af590fd82c8ea490806e33417"
+        "revision" : "968610c5f7f2fc0602dced2bc2f9564610465b19"
       }
     },
     {
