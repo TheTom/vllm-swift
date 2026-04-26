@@ -23,6 +23,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SWIFT_DIR="$PROJECT_DIR/swift"
 BUILD_DIR="$SWIFT_DIR/.build/arm64-apple-macosx/$CONFIG"
+CHECKOUT_MLXLM_DIR="$SWIFT_DIR/.build/checkouts/mlx-swift-lm"
+CHECKOUT_METALLIB_SCRIPT="$CHECKOUT_MLXLM_DIR/scripts/build-metallib.sh"
+CHECKOUT_METALLIB_PATH="$CHECKOUT_MLXLM_DIR/.build/arm64-apple-macosx/$CONFIG/mlx.metallib"
+
+_metallib_has_gdn_kernels() {
+    local metallib="$1"
+    [ -f "$metallib" ] || return 1
+    # Use grep directly on binary data (-a) to avoid pipefail/SIGPIPE false negatives
+    # from `strings | grep -q` pipelines.
+    LC_ALL=C grep -aq "gated_delta_step_fused_" "$metallib"
+}
+
+_metal_compiler_available() {
+    xcrun metal -v >/dev/null 2>&1
+}
 
 echo "=== vllm-swift installer ==="
 echo "Config: $CONFIG"
@@ -57,7 +72,15 @@ echo ""
 # Build Swift bridge
 echo "Building Swift bridge ($CONFIG)..."
 cd "$SWIFT_DIR"
-swift build -c "$CONFIG" 2>&1 | tail -3
+SWIFT_BUILD_LOG="$(mktemp)"
+if ! swift build -c "$CONFIG" >"$SWIFT_BUILD_LOG" 2>&1; then
+    echo "ERROR: Swift build failed. Last 80 lines:"
+    tail -80 "$SWIFT_BUILD_LOG"
+    rm -f "$SWIFT_BUILD_LOG"
+    exit 1
+fi
+tail -3 "$SWIFT_BUILD_LOG"
+rm -f "$SWIFT_BUILD_LOG"
 
 DYLIB="$BUILD_DIR/libVLLMBridge.dylib"
 if [ ! -f "$DYLIB" ]; then
@@ -70,19 +93,48 @@ echo ""
 # Find and copy MLX metallib
 echo "Setting up MLX metallib..."
 MLX_METALLIB=""
+MLX_METALLIB_FALLBACK=""
+
+if [ -f "$CHECKOUT_METALLIB_SCRIPT" ]; then
+    echo "  Attempting metallib build from mlx-swift-lm checkout..."
+    if _metal_compiler_available; then
+        if bash "$CHECKOUT_METALLIB_SCRIPT" "$CONFIG"; then
+            if [ -f "$CHECKOUT_METALLIB_PATH" ]; then
+                cp "$CHECKOUT_METALLIB_PATH" "$BUILD_DIR/mlx.metallib"
+                echo "  Built and copied checkout metallib: $CHECKOUT_METALLIB_PATH"
+            fi
+        else
+            echo "  WARNING: Checkout metallib build failed. Will fall back to existing metallib candidates."
+        fi
+    else
+        echo "  WARNING: Metal compiler is not runnable in this Xcode setup."
+        echo "           Install/update Metal Toolchain, then rerun install:"
+        echo "           xcodebuild -downloadComponent MetalToolchain"
+    fi
+fi
 
 # Check common locations for the metallib
 for candidate in \
     "$BUILD_DIR/mlx.metallib" \
+    "$CHECKOUT_METALLIB_PATH" \
     "$SWIFT_DIR/.build/artifacts/mlx-swift/mlxc.artifactbundle/"*"/mlx.metallib" \
     "$(python3 -c 'import mlx; import os; print(os.path.join(os.path.dirname(mlx.__file__), "lib", "mlx.metallib"))' 2>/dev/null || echo '')" \
     "$HOME/Library/Developer/Xcode/DerivedData/"*"/Build/Products/"*"/mlx.metallib"
 do
     if [ -n "$candidate" ] && [ -f "$candidate" ]; then
-        MLX_METALLIB="$candidate"
-        break
+        if _metallib_has_gdn_kernels "$candidate"; then
+            MLX_METALLIB="$candidate"
+            break
+        fi
+        if [ -z "$MLX_METALLIB_FALLBACK" ]; then
+            MLX_METALLIB_FALLBACK="$candidate"
+        fi
     fi
 done
+
+if [ -z "$MLX_METALLIB" ] && [ -n "$MLX_METALLIB_FALLBACK" ]; then
+    MLX_METALLIB="$MLX_METALLIB_FALLBACK"
+fi
 
 if [ -n "$MLX_METALLIB" ]; then
     if [ "$MLX_METALLIB" != "$BUILD_DIR/mlx.metallib" ]; then
@@ -105,6 +157,26 @@ except: pass
     if [ ! -f "$BUILD_DIR/mlx.metallib" ]; then
         echo "  WARNING: Could not generate metallib. Some models (GDN/TurboFlash) may fail."
         echo "  To fix: pip install mlx && python3 -c 'import mlx.core; mlx.core.eval(mlx.core.array([1]))'  "
+    fi
+fi
+
+if [ -f "$BUILD_DIR/mlx.metallib" ]; then
+    if _metallib_has_gdn_kernels "$BUILD_DIR/mlx.metallib"; then
+        echo "  Verified: gated_delta kernels present in mlx.metallib"
+    else
+        echo "  ERROR: gated_delta kernels NOT found in $BUILD_DIR/mlx.metallib"
+        echo "  Models like Qwen3.6-27B-ConfigI-MLX will fail at runtime."
+        if ! _metal_compiler_available; then
+            echo "  Metal compiler is unavailable. Install/update Metal Toolchain:"
+            echo "    xcodebuild -downloadComponent MetalToolchain"
+        fi
+        echo "  Verify with: strings $BUILD_DIR/mlx.metallib | grep gated_delta"
+        if [ "${VLLM_SWIFT_ALLOW_STOCK_METALLIB:-0}" != "1" ]; then
+            echo "  Failing install because required GDN kernels are missing."
+            echo "  Override (not recommended): VLLM_SWIFT_ALLOW_STOCK_METALLIB=1 ./scripts/install.sh"
+            exit 1
+        fi
+        echo "  WARNING: continuing because VLLM_SWIFT_ALLOW_STOCK_METALLIB=1"
     fi
 fi
 echo ""
@@ -185,5 +257,10 @@ echo ""
 echo "Quick start:"
 echo "  cd $PROJECT_DIR"
 echo "  source activate.sh"
+echo "  # Baseline model"
 echo "  vllm serve ~/models/Qwen3-4B-4bit --max-model-len 4096"
+echo ""
+echo "  # ConfigI model (requires gated_delta kernels)"
+echo "  hf download thetom-ai/Qwen3.6-27B-ConfigI-MLX"
+echo "  vllm serve thetom-ai/Qwen3.6-27B-ConfigI-MLX --max-model-len 4096"
 echo ""
