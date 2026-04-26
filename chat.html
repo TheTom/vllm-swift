@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vLLM Chat</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #dbe3ec;
+      --text: #101419;
+      --muted: #5a6775;
+      --accent: #0c66d6;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .app { max-width: 980px; margin: 16px auto; padding: 0 12px; }
+    .panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    .row { display: flex; gap: 8px; margin: 8px 0; }
+    .grow { flex: 1; }
+    label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+    input, textarea, button {
+      font: inherit;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      box-sizing: border-box;
+    }
+    input, textarea { width: 100%; background: #fff; color: var(--text); }
+    textarea { min-height: 90px; resize: vertical; }
+    button { background: #fff; cursor: pointer; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #log {
+      height: 58vh;
+      overflow: auto;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="panel">
+      <div class="row">
+        <div class="grow">
+          <label for="baseUrl">Base URL</label>
+          <input id="baseUrl" value="http://127.0.0.1:8000" />
+        </div>
+        <div class="grow">
+          <label for="model">Model</label>
+          <input id="model" value="thetom-ai/Qwen3.6-27B-ConfigI-MLX" />
+        </div>
+        <div class="grow">
+          <label for="apiKey">API key (optional)</label>
+          <input id="apiKey" placeholder="sk-..." />
+        </div>
+      </div>
+
+      <div id="log"></div>
+
+      <div class="row">
+        <div class="grow">
+          <label for="prompt">Message</label>
+          <textarea id="prompt" placeholder="Type message, then click Send."></textarea>
+          <div class="hint">Shortcut: Ctrl+Enter (or Cmd+Enter)</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="clearBtn">Clear</button>
+        <button id="sendBtn" class="primary">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const promptEl = document.getElementById("prompt");
+    const sendBtn = document.getElementById("sendBtn");
+    const clearBtn = document.getElementById("clearBtn");
+
+    let messages = [{ role: "system", content: "You are a helpful assistant." }];
+
+    function append(role, text) {
+      logEl.textContent += role + ": " + text + "\n\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function send() {
+      const text = promptEl.value.trim();
+      if (!text) return;
+
+      const baseUrl = document.getElementById("baseUrl").value.replace(/\/+$/, "");
+      const model = document.getElementById("model").value.trim();
+      const apiKey = document.getElementById("apiKey").value.trim();
+      if (!model) return;
+
+      promptEl.value = "";
+      append("user", text);
+      messages.push({ role: "user", content: text });
+
+      sendBtn.disabled = true;
+      sendBtn.textContent = "Sending...";
+      try {
+        const headers = { "Content-Type": "application/json" };
+        if (apiKey) headers.Authorization = "Bearer " + apiKey;
+
+        const res = await fetch(baseUrl + "/v1/chat/completions", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature: 0.7
+          })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          append("error", JSON.stringify(data, null, 2));
+          return;
+        }
+
+        const out = data && data.choices && data.choices[0] &&
+          data.choices[0].message && data.choices[0].message.content
+          ? data.choices[0].message.content
+          : JSON.stringify(data);
+
+        append("assistant", out);
+        messages.push({ role: "assistant", content: out });
+      } catch (err) {
+        append("error", String(err));
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = "Send";
+      }
+    }
+
+    clearBtn.addEventListener("click", () => {
+      messages = [{ role: "system", content: "You are a helpful assistant." }];
+      logEl.textContent = "";
+      promptEl.focus();
+    });
+    sendBtn.addEventListener("click", send);
+    promptEl.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") send();
+    });
+  </script>
+</body>
+</html>
