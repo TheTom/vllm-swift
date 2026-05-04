@@ -1,19 +1,68 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-swift"
-version = "0.3.0"
+version = "0.3.1"
 description = "vLLM Metal plugin powered by mlx-swift — high-performance LLM inference on Apple Silicon"
+readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
+authors = [
+    { name = "Tom Turney (TheTom)" },
+]
+keywords = [
+    "vllm",
+    "mlx",
+    "swift",
+    "metal",
+    "apple-silicon",
+    "llm",
+    "inference",
+    "kv-cache",
+    "turboquant",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = []  # vLLM installed separately (build from source is complex)
+
+[project.optional-dependencies]
+download = ["huggingface-hub>=0.20"]
+
+[project.scripts]
+vllm-swift = "vllm_swift.cli:main"
 
 [project.entry-points."vllm.platform_plugins"]
 swift = "vllm_swift:register"
 
+[project.urls]
+Homepage = "https://github.com/TheTom/vllm-swift"
+Repository = "https://github.com/TheTom/vllm-swift"
+Issues = "https://github.com/TheTom/vllm-swift/issues"
+
 [tool.setuptools.packages.find]
 include = ["vllm_swift*"]
+
+[tool.setuptools.package-data]
+# Ship Swift bridge dylib + Metal kernel lib inside the wheel so
+# `pip install vllm-swift` is self-contained on Apple Silicon (no separate
+# brew install or compilation step needed).
+vllm_swift = [
+    "_lib/libVLLMBridge.dylib",
+    "_lib/mlx.metallib",
+]
 
 [tool.ruff]
 line-length = 99

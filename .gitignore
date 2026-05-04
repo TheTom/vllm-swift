@@ -6,6 +6,11 @@ build/
 .venv*/
 *.dylib
 *.so
+*.metallib
 .build/
 .swiftpm/
 *.o
+
+# Bundled binaries copied into the package right before `python -m build`.
+# Source of truth lives in swift/.build/arm64-apple-macosx/release/
+vllm_swift/_lib/
