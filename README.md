@@ -16,11 +16,21 @@
 
 ### 1. Install
 
+**Homebrew** (recommended for Mac power users):
+
 ```bash
 brew tap TheTom/tap && brew install vllm-swift
 ```
 
-Or from source:
+**pip** (everyone else, including dev containers and non-brew Macs):
+
+```bash
+pip install vllm-swift
+```
+
+The pip wheel bundles the prebuilt Swift bridge dylib + Metal kernel library, so no compile or brew step is required. Apple Silicon, Python 3.10+, macOS 11+.
+
+**From source:**
 
 ```bash
 git clone https://github.com/TheTom/vllm-swift.git && cd vllm-swift
