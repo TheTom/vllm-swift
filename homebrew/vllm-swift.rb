@@ -11,7 +11,7 @@ class VllmSwift < Formula
   desc "Native Swift/Metal backend for vLLM on Apple Silicon"
   homepage "https://github.com/TheTom/vllm-swift"
   url "https://github.com/TheTom/vllm-swift.git", branch: "main"
-  version "0.3.0"
+  version "0.3.1"
   license "Apache-2.0"
 
   bottle do
@@ -92,7 +92,28 @@ class VllmSwift < Formula
           # to its placeholder default (Qwen/Qwen3-0.6B). See #11.
           MODEL="${1:?Usage: vllm-swift serve <model-path-or-hf-id> [vllm args...]}"
           shift
-          exec "$VENV_PYTHON" -m vllm.entrypoints.openai.api_server --model "$MODEL" "$@"
+          # Smart defaults: auto-inject --enable-auto-tool-choice and --tool-call-parser
+          # if user didn't pass them and the model architecture maps to a known parser.
+          # Hermes (the agent client) and most OpenAI clients send tool_choice=auto by
+          # default; vLLM rejects that without these flags. Detection is conservative:
+          # only injects when both architecture mapping AND chat-template tool fields
+          # are present, so non-tool-capable models don't get a spurious parser.
+          EXTRA_ARGS=()
+          HAS_TOOL_FLAG=0
+          for arg in "$@"; do
+            case "$arg" in
+              --tool-call-parser|--tool-call-parser=*|--enable-auto-tool-choice|--no-enable-auto-tool-choice) HAS_TOOL_FLAG=1 ;;
+            esac
+          done
+          if [ "$HAS_TOOL_FLAG" = 0 ]; then
+            PARSER=$("$VENV_PYTHON" "#{libexec}/scripts/detect_tool_parser.py" "$MODEL" 2>/dev/null)
+            if [ -n "$PARSER" ]; then
+              echo "vllm-swift: auto-detected tool parser '$PARSER' for $(basename "$MODEL"); injecting --enable-auto-tool-choice --tool-call-parser $PARSER"
+              echo "  (override with explicit --tool-call-parser <name> or --no-enable-auto-tool-choice)"
+              EXTRA_ARGS+=(--enable-auto-tool-choice --tool-call-parser "$PARSER")
+            fi
+          fi
+          exec "$VENV_PYTHON" -m vllm.entrypoints.openai.api_server --model "$MODEL" "${EXTRA_ARGS[@]}" "$@"
           ;;
         download)
           shift
@@ -111,7 +132,7 @@ class VllmSwift < Formula
           exec "#{libexec}/scripts/integration_test.sh" "$@"
           ;;
         version)
-          echo "vllm-swift 0.3.0"
+          echo "vllm-swift 0.3.1"
           echo "dylib: #{lib}/libVLLMBridge.dylib"
           "$VENV_PYTHON" -c "import vllm; print(f'vLLM: {vllm.__version__}')" 2>/dev/null || true
           ;;
@@ -148,6 +169,6 @@ class VllmSwift < Formula
   test do
     assert_predicate lib/"libVLLMBridge.dylib", :exist?
     assert_match "vllm-swift", shell_output("#{bin}/vllm-swift")
-    assert_match "0.3.0", shell_output("#{bin}/vllm-swift version")
+    assert_match "0.3.1", shell_output("#{bin}/vllm-swift version")
   end
 end
