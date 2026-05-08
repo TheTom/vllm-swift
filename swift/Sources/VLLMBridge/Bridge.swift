@@ -1146,6 +1146,47 @@ public func vsm_engine_active_requests(_ handle: UnsafeMutableRawPointer?) -> In
     }
 }
 
+/// Retrieve stashed first sampled tokens after `vsm_engine_prefill_batched_uniform`.
+///
+/// The batched-uniform prefill stashes `firstTokens` into `engine.batchTokens[slot]`
+/// (Bridge.swift:1511-1515). Sequential `prefill_req` returns this token directly;
+/// the batched path doesn't return per-request, so callers (e.g. vLLM worker) need
+/// a getter that reads `engine.batchTokens[engine.batchSlots[rid]]` for each rid
+/// without advancing decode state.
+///
+/// Writes one Int32 per request to `outTokens[0..<numReqs]`. Returns numReqs on
+/// success, negative on failure. If a `rid` has no batch slot, writes -1.
+@_cdecl("vsm_engine_get_batch_tokens")
+public func vsm_engine_get_batch_tokens(
+    _ handle: UnsafeMutableRawPointer?,
+    reqIds: UnsafePointer<UnsafePointer<CChar>?>?,
+    numReqs: Int32,
+    outTokens: UnsafeMutablePointer<Int32>?
+) -> Int32 {
+    guard let handle, let reqIds, let outTokens else { return -1 }
+    let n = Int(numReqs)
+    guard n > 0 else { return -1 }
+
+    return engineQueue.sync { () -> Int32 in
+        guard let engine = engines[handle] else { return -1 }
+        for i in 0..<n {
+            guard let cstr = reqIds[i] else {
+                outTokens[i] = -1
+                continue
+            }
+            let rid = String(cString: cstr)
+            if let slot = engine.batchSlots[rid],
+               slot >= 0,
+               slot < engine.batchTokens.count {
+                outTokens[i] = Int32(engine.batchTokens[slot])
+            } else {
+                outTokens[i] = -1
+            }
+        }
+        return Int32(n)
+    }
+}
+
 @_cdecl("vsm_engine_decode_batch")
 public func vsm_engine_decode_batch(
     _ handle: UnsafeMutableRawPointer?,

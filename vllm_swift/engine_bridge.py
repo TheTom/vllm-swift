@@ -128,6 +128,30 @@ def _get_lib():
         ctypes.c_float,
         ctypes.c_float,
     ]
+    # Batched-uniform prefill: replaces B sequential prefill_req calls with a
+    # single [B, T] forward pass. Same prompt length T for all B requests.
+    # See Bridge.swift:1349-1407 (vsm_engine_prefill_batched_uniform).
+    _lib.vsm_engine_prefill_batched_uniform.restype = ctypes.c_int32
+    _lib.vsm_engine_prefill_batched_uniform.argtypes = [
+        ctypes.c_void_p,                  # handle
+        ctypes.POINTER(ctypes.c_char_p),  # reqIds[B]
+        ctypes.POINTER(ctypes.c_int32),   # promptTokens[B*T] (flattened, row-major)
+        ctypes.c_int32,                   # numReqs (B)
+        ctypes.c_int32,                   # promptLen (T)
+        ctypes.c_float,                   # temperature
+        ctypes.c_float,                   # topP
+    ]
+    # Retrieve stashed first sampled tokens after batched-uniform prefill.
+    # Sequential prefill_req returns first_token directly; batched path stashes
+    # them in engine.batchTokens, so we need a getter for vLLM worker to wire
+    # them into sampled_token_ids. See Bridge.swift vsm_engine_get_batch_tokens.
+    _lib.vsm_engine_get_batch_tokens.restype = ctypes.c_int32
+    _lib.vsm_engine_get_batch_tokens.argtypes = [
+        ctypes.c_void_p,                  # handle
+        ctypes.POINTER(ctypes.c_char_p),  # reqIds[B]
+        ctypes.c_int32,                   # numReqs (B)
+        ctypes.POINTER(ctypes.c_int32),   # outTokens[B] (output)
+    ]
     _lib.vsm_engine_decode_step_req.restype = ctypes.c_int32
     _lib.vsm_engine_decode_step_req.argtypes = [
         ctypes.c_void_p,
@@ -254,6 +278,68 @@ class SwiftInferenceEngine:
         return self._lib.vsm_engine_prefill_req(
             self._handle, req_id.encode(), arr, len(prompt_tokens), temperature, top_p
         )
+
+    def prefill_batched_uniform(
+        self,
+        req_ids: list[str],
+        prompt_tokens_flat: list[int],
+        prompt_len: int,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+    ) -> int:
+        """Batched uniform-length prefill: B requests, same prompt length T.
+
+        Replaces B sequential `prefill_req` calls with a single ``[B, T]``
+        forward pass through the model. All requests must have identical
+        prompt length and identical sampling params; the caller is
+        responsible for grouping/filtering before this call.
+
+        First sampled tokens are stashed in the engine — retrieve them via
+        `get_batch_tokens(req_ids)` after a successful prefill.
+
+        Args:
+            req_ids: B request ID strings (one per row).
+            prompt_tokens_flat: flattened ``B * T`` tokens, row-major
+                (request i tokens at offset ``i * T``).
+            prompt_len: T (the per-request prompt length).
+            temperature, top_p: shared sampling params.
+
+        Returns:
+            0 on success, negative on failure (per Bridge.swift error codes).
+
+        See: Bridge.swift:1349-1407, audit at
+        docs/m5-bridge-prefill-audit-2026-05-08.md.
+        """
+        n = len(req_ids)
+        if n * prompt_len != len(prompt_tokens_flat):
+            raise ValueError(
+                f"prompt_tokens_flat length {len(prompt_tokens_flat)} "
+                f"!= B*T = {n}*{prompt_len}"
+            )
+        rid_ptrs = (ctypes.c_char_p * n)(*[r.encode() for r in req_ids])
+        tok_arr = (ctypes.c_int32 * (n * prompt_len))(*prompt_tokens_flat)
+        return self._lib.vsm_engine_prefill_batched_uniform(
+            self._handle, rid_ptrs, tok_arr, n, prompt_len, temperature, top_p
+        )
+
+    def get_batch_tokens(self, req_ids: list[str]) -> list[int]:
+        """Retrieve stashed first sampled tokens after batched-uniform prefill.
+
+        Reads ``engine.batchTokens[engine.batchSlots[rid]]`` for each rid.
+        Returns -1 for any rid not currently in the batch slot map.
+        Does NOT advance decode state.
+        """
+        n = len(req_ids)
+        if n == 0:
+            return []
+        rid_ptrs = (ctypes.c_char_p * n)(*[r.encode() for r in req_ids])
+        out = (ctypes.c_int32 * n)()
+        rc = self._lib.vsm_engine_get_batch_tokens(
+            self._handle, rid_ptrs, n, out
+        )
+        if rc < 0:
+            raise RuntimeError(f"get_batch_tokens failed: rc={rc}")
+        return [int(out[i]) for i in range(n)]
 
     def decode_step_req(self, req_id: str) -> int:
         return self._lib.vsm_engine_decode_step_req(self._handle, req_id.encode())

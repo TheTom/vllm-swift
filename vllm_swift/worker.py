@@ -236,44 +236,130 @@ class SwiftMetalWorker:
         sampled_token_ids: list[list[int]] = []
         req_ids: list[str] = []
 
-        # Handle new requests (prefill) — each gets its own session
-        for new_req in scheduler_output.scheduled_new_reqs:
+        # Handle new requests (prefill).
+        #
+        # Two paths:
+        #   - Batched-uniform: groups of >=2 new requests with identical
+        #     prompt length AND identical sampling params (temp, top_p) AND
+        #     no multimodal inputs go through `prefill_batched_uniform`,
+        #     replacing B sequential `prefill_req` calls with a single
+        #     [B, T] forward pass. Per Bridge.swift:1351, this collapses
+        #     ~23-27s for B=64/T=2048 on 4B into ONE forward.
+        #   - Per-request fallback: singletons, mixed-length groups,
+        #     mixed-sampling groups, and VLM requests keep the original
+        #     `prefill_req` / `prefill_vlm` per-request loop.
+        #
+        # See docs/m5-bridge-prefill-audit-2026-05-08.md for the rationale.
+        new_reqs = list(scheduler_output.scheduled_new_reqs)
+
+        def _has_multimodal(req: object) -> bool:
+            mm = getattr(req, "mm_features", None)
+            return bool(mm and hasattr(mm, "pixel_values"))
+
+        # Partition: VLM / non-VLM. Then group non-VLM by (prompt_len, temp, top_p).
+        vlm_reqs: list = []
+        groupable: dict[tuple, list] = {}
+        for r in new_reqs:
+            if _has_multimodal(r):
+                vlm_reqs.append(r)
+                continue
+            sp = r.sampling_params
+            key = (
+                len(r.prompt_token_ids),
+                round(float(getattr(sp, "temperature", 0.0)), 6),
+                round(float(getattr(sp, "top_p", 1.0)), 6),
+            )
+            groupable.setdefault(key, []).append(r)
+
+        # Process groupable: batched if size >= 2, else fall back to per-request.
+        for (plen, temp, top_p), reqs in groupable.items():
+            if len(reqs) >= 2:
+                grp_req_ids = [r.req_id for r in reqs]
+                flat_tokens: list[int] = []
+                for r in reqs:
+                    flat_tokens.extend(r.prompt_token_ids)
+                rc = self.engine.prefill_batched_uniform(
+                    grp_req_ids,
+                    flat_tokens,
+                    plen,
+                    temperature=temp,
+                    top_p=top_p,
+                )
+                if rc != 0:
+                    # Batched path failed — fall back to per-request for this group.
+                    logger.warning(
+                        "prefill_batched_uniform rc=%d (B=%d, T=%d); falling back",
+                        rc, len(reqs), plen,
+                    )
+                    for r in reqs:
+                        first_token = self.engine.prefill_req(
+                            r.req_id, list(r.prompt_token_ids),
+                            temperature=temp, top_p=top_p,
+                        )
+                        sp_r = r.sampling_params
+                        self._active_requests[r.req_id] = [first_token]
+                        self._request_params[r.req_id] = {
+                            "temperature": temp, "top_p": top_p,
+                            "logprobs": getattr(sp_r, "logprobs", None) is not None,
+                        }
+                        req_ids.append(r.req_id)
+                        sampled_token_ids.append([first_token])
+                    continue
+                # Batched success — pull stashed first tokens for this group.
+                first_tokens = self.engine.get_batch_tokens(grp_req_ids)
+                for r, first_token in zip(reqs, first_tokens):
+                    sp_r = r.sampling_params
+                    self._active_requests[r.req_id] = [first_token]
+                    self._request_params[r.req_id] = {
+                        "temperature": temp, "top_p": top_p,
+                        "logprobs": getattr(sp_r, "logprobs", None) is not None,
+                    }
+                    req_ids.append(r.req_id)
+                    sampled_token_ids.append([first_token])
+            else:
+                # Singleton — per-request fallback.
+                r = reqs[0]
+                first_token = self.engine.prefill_req(
+                    r.req_id, list(r.prompt_token_ids),
+                    temperature=temp, top_p=top_p,
+                )
+                sp_r = r.sampling_params
+                self._active_requests[r.req_id] = [first_token]
+                self._request_params[r.req_id] = {
+                    "temperature": temp, "top_p": top_p,
+                    "logprobs": getattr(sp_r, "logprobs", None) is not None,
+                }
+                req_ids.append(r.req_id)
+                sampled_token_ids.append([first_token])
+
+        # VLM path keeps the original per-request prefill_vlm.
+        for new_req in vlm_reqs:
             req_id = new_req.req_id
             prompt_tokens = list(new_req.prompt_token_ids)
             sp = new_req.sampling_params
             temp = getattr(sp, "temperature", 0.0)
             top_p = getattr(sp, "top_p", 1.0)
-
-            # Check for multimodal (VLM) inputs
-            # vLLM preprocesses images Python-side — mm_features has ready pixels
-            mm_features = getattr(new_req, "mm_features", None)
-            if mm_features and hasattr(mm_features, "pixel_values"):
-                pv = mm_features.pixel_values
-                if hasattr(pv, "numpy"):
-                    pv = pv.numpy()
-                pixel_list = pv.flatten().tolist()
-                pixel_shape = list(pv.shape)
-                # Extract image_grid_thw if available
-                grid_thw = None
-                if hasattr(mm_features, "image_grid_thw"):
-                    g = mm_features.image_grid_thw
-                    if hasattr(g, "numpy"):
-                        g = g.numpy()
-                    grid_thw = g.flatten().tolist()[:3]
-                first_token = self.engine.prefill_vlm(
-                    req_id,
-                    prompt_tokens,
-                    pixels=pixel_list,
-                    pixel_shape=pixel_shape,
-                    grid_thw=grid_thw,
-                    temperature=temp,
-                    top_p=top_p,
-                )
-            else:
-                first_token = self.engine.prefill_req(
-                    req_id, prompt_tokens, temperature=temp, top_p=top_p
-                )
-
+            mm_features = new_req.mm_features
+            pv = mm_features.pixel_values
+            if hasattr(pv, "numpy"):
+                pv = pv.numpy()
+            pixel_list = pv.flatten().tolist()
+            pixel_shape = list(pv.shape)
+            grid_thw = None
+            if hasattr(mm_features, "image_grid_thw"):
+                g = mm_features.image_grid_thw
+                if hasattr(g, "numpy"):
+                    g = g.numpy()
+                grid_thw = g.flatten().tolist()[:3]
+            first_token = self.engine.prefill_vlm(
+                req_id,
+                prompt_tokens,
+                pixels=pixel_list,
+                pixel_shape=pixel_shape,
+                grid_thw=grid_thw,
+                temperature=temp,
+                top_p=top_p,
+            )
             self._active_requests[req_id] = [first_token]
             self._request_params[req_id] = {
                 "temperature": temp,
