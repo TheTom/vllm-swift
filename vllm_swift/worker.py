@@ -244,19 +244,40 @@ class SwiftMetalWorker:
             temp = getattr(sp, "temperature", 0.0)
             top_p = getattr(sp, "top_p", 1.0)
 
-            # Check for multimodal (VLM) inputs
-            # vLLM preprocesses images Python-side — mm_features has ready pixels
+            # Check for multimodal (VLM) inputs.
+            # vLLM preprocesses images Python-side. In vLLM v0.19+, `mm_features`
+            # is `list[MultiModalFeatureSpec]` (one per image/video item), not a
+            # single object. Use the static `gather_kwargs` helper to pull
+            # pixel_values / image_grid_thw out of all items.
             mm_features = getattr(new_req, "mm_features", None)
-            if mm_features and hasattr(mm_features, "pixel_values"):
-                pv = mm_features.pixel_values
+            mm_pv_kwargs = None
+            if mm_features:
+                try:
+                    from vllm.multimodal.inputs import MultiModalFeatureSpec as _MMFS
+                    mm_pv_kwargs = _MMFS.gather_kwargs(
+                        mm_features,
+                        {"pixel_values", "image_grid_thw"},
+                    )
+                except Exception:
+                    mm_pv_kwargs = None
+
+            if mm_pv_kwargs and mm_pv_kwargs.get("pixel_values"):
+                # gather_kwargs returns {key: list_of_tensors_per_item}.
+                # Concatenate per-item tensors along the patch axis (dim 0).
+                pv_items = mm_pv_kwargs["pixel_values"]
+                pv = pv_items[0] if len(pv_items) == 1 else torch.cat(pv_items, dim=0)
+                if hasattr(pv, "detach"):
+                    pv = pv.detach().to(torch.float32).cpu().contiguous()
                 if hasattr(pv, "numpy"):
                     pv = pv.numpy()
                 pixel_list = pv.flatten().tolist()
                 pixel_shape = list(pv.shape)
-                # Extract image_grid_thw if available
                 grid_thw = None
-                if hasattr(mm_features, "image_grid_thw"):
-                    g = mm_features.image_grid_thw
+                gthw_items = mm_pv_kwargs.get("image_grid_thw") or []
+                if gthw_items:
+                    g = gthw_items[0] if len(gthw_items) == 1 else torch.cat(gthw_items, dim=0)
+                    if hasattr(g, "detach"):
+                        g = g.detach().cpu().contiguous()
                     if hasattr(g, "numpy"):
                         g = g.numpy()
                     grid_thw = g.flatten().tolist()[:3]
