@@ -183,24 +183,66 @@ public func vsm_engine_create(
     // Resolve symlinks: MLX's qwen3 path errors out on symlinked dirs.
     let modelURL = URL(fileURLWithPath: modelId).resolvingSymlinksInPath()
 
+    // Detect whether this model has a vision tower by inspecting config.json.
+    // For dual-registered model types (e.g. `qwen3_5`), `LLMModelFactory` will
+    // happily load a VL checkpoint as a text-only model, silently skipping the
+    // vision tower forward pass. That breaks image inputs (image-placeholder
+    // tokens get embedded as raw text). When `vision_config` (or any vision
+    // marker) is present in config.json, prefer the VLM factory; otherwise
+    // keep the LLM-first fast path that engages BatchedHybridLLM.
+    let isVisionModel: Bool = {
+        let cfgURL = modelURL.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: cfgURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        if obj["vision_config"] != nil { return true }
+        if let archs = obj["architectures"] as? [String] {
+            for a in archs {
+                let s = a.lowercased()
+                if s.contains("vl") || s.contains("vision") ||
+                   s.contains("conditionalgeneration") {
+                    return true
+                }
+            }
+        }
+        if let mt = obj["model_type"] as? String {
+            let m = mt.lowercased()
+            if m.contains("vl") || m.contains("vision") { return true }
+        }
+        return false
+    }()
+
     Task {
         do {
-            // Load via LLM factory first; the shared `loadModel(from:using:)`
-            // walks `ModelFactoryRegistry` which registers VLM before LLM, so
-            // dual-registered types (e.g. `qwen3_5`) would resolve to the VLM
-            // wrapper that doesn't conform to `BatchedHybridLLM` and bypass
-            // the batched-decode fast path. Fall back to VLM only on failure.
-            do {
-                result.context = try await MLXLLM.LLMModelFactory.shared.load(
-                    from: modelURL,
-                    using: StubTokenizerLoader()
-                )
-            } catch {
-                print("[vsm] LLM load failed, trying VLM: \(error.localizedDescription)")
-                result.context = try await MLXVLM.VLMModelFactory.shared.load(
-                    from: modelURL,
-                    using: StubTokenizerLoader()
-                )
+            if isVisionModel {
+                // VL-first path: load via VLMModelFactory so the vision tower
+                // forward + image-feature merge run.
+                do {
+                    result.context = try await MLXVLM.VLMModelFactory.shared.load(
+                        from: modelURL,
+                        using: StubTokenizerLoader()
+                    )
+                } catch {
+                    print("[vsm] VLM load failed, trying LLM: \(error.localizedDescription)")
+                    result.context = try await MLXLLM.LLMModelFactory.shared.load(
+                        from: modelURL,
+                        using: StubTokenizerLoader()
+                    )
+                }
+            } else {
+                // LLM-first fast path (unchanged): preserves BatchedHybridLLM.
+                do {
+                    result.context = try await MLXLLM.LLMModelFactory.shared.load(
+                        from: modelURL,
+                        using: StubTokenizerLoader()
+                    )
+                } catch {
+                    print("[vsm] LLM load failed, trying VLM: \(error.localizedDescription)")
+                    result.context = try await MLXVLM.VLMModelFactory.shared.load(
+                        from: modelURL,
+                        using: StubTokenizerLoader()
+                    )
+                }
             }
         } catch {
             result.error = error
@@ -739,7 +781,11 @@ public func vsm_engine_prefill_vlm(
         guard let engine = engines[handle] else { return Int32(-1) }
 
         let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
-        let tokenArray = MLXArray(tokens)
+        // VLM forward path (e.g. mlx-swift-lm's MLXVLM/Qwen35) expects token
+        // ids in `[B, S]` shape, not flat `[S]`. embedTokens on a 1D input
+        // produces 2D `[S, H]`, which then crashes the linear-attention
+        // reshape that wants 3D `[B, S, H]`. Wrap to a batch of one here.
+        let tokenArray = MLXArray(tokens).reshaped(1, tokens.count)
 
         var params = engine.generateParams
         params.temperature = temperature
