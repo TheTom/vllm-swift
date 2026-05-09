@@ -781,7 +781,11 @@ public func vsm_engine_prefill_vlm(
         guard let engine = engines[handle] else { return Int32(-1) }
 
         let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
-        let tokenArray = MLXArray(tokens)
+        // VLM forward path (e.g. mlx-swift-lm's MLXVLM/Qwen35) expects token
+        // ids in `[B, S]` shape, not flat `[S]`. embedTokens on a 1D input
+        // produces 2D `[S, H]`, which then crashes the linear-attention
+        // reshape that wants 3D `[B, S, H]`. Wrap to a batch of one here.
+        let tokenArray = MLXArray(tokens).reshaped(1, tokens.count)
 
         var params = engine.generateParams
         params.temperature = temperature
