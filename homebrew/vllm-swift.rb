@@ -11,12 +11,12 @@ class VllmSwift < Formula
   desc "Native Swift/Metal backend for vLLM on Apple Silicon"
   homepage "https://github.com/TheTom/vllm-swift"
   url "https://github.com/TheTom/vllm-swift.git", branch: "main"
-  version "0.6.0"
+  version "0.6.1"
   license "Apache-2.0"
 
   bottle do
     root_url "https://github.com/TheTom/homebrew-tap/releases/download/bottles"
-    sha256 cellar: :any, arm64_tahoe:   "27fad07b8b4dafc2c949630c8fccdf170c6325113574dfedd47573a294b30d24"
+    sha256 cellar: :any, arm64_tahoe:   "3327ca304c221826518c91f0724f00a0a1f4d3525ec02241f2571a71cb14a71d"
     # arm64_sequoia + arm64_sonoma SHAs to be filled by mirror builds on
     # those macOS versions. Until then, sequoia / sonoma users build from
     # source (HOMEBREW_NO_SANDBOX=1 brew install vllm-swift).

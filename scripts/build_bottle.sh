@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="0.6.0"
+VERSION="0.6.1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SWIFT_DIR="$PROJECT_DIR/swift"
@@ -40,6 +40,45 @@ if [ -z "$DYLIB" ]; then
 fi
 echo "Built: $DYLIB"
 
+# Build MLX metallib (SPM doesn't compile .metal files; mlx-swift-lm ships
+# a build-metallib.sh that drives xcrun metal/metallib over the
+# SPM-resolved .metal sources). We need this for every bottle build —
+# previously this step was implicit (whatever metallib happened to be in
+# .build/), which led to v0.6.0 shipping a stale metallib missing the
+# `turbo_dequant_rotated_*` family. Re-running the script here guarantees
+# a fresh build that matches the current mlx-swift pin.
+echo "Building MLX metallib (custom kernels)..."
+METAL_BUILD_SCRIPT="$SWIFT_DIR/.build/checkouts/mlx-swift-lm/scripts/build-metallib.sh"
+GENERATED_METALLIB="$SWIFT_DIR/.build/checkouts/mlx-swift-lm/.build/arm64-apple-macosx/release/mlx.metallib"
+if [ ! -f "$METAL_BUILD_SCRIPT" ]; then
+    echo "ERROR: build-metallib.sh missing at $METAL_BUILD_SCRIPT"
+    echo "  Did swift build resolve mlx-swift-lm? Try: swift package resolve"
+    exit 1
+fi
+METAL_LOG=$(mktemp)
+trap 'rm -f "$METAL_LOG"' EXIT
+if ! bash "$METAL_BUILD_SCRIPT" release >"$METAL_LOG" 2>&1; then
+    echo "ERROR: build-metallib.sh failed. Last 30 lines:"
+    tail -30 "$METAL_LOG"
+    exit 1
+fi
+if [ ! -s "$GENERATED_METALLIB" ]; then
+    echo "ERROR: build-metallib.sh produced no metallib at $GENERATED_METALLIB"
+    cat "$METAL_LOG"
+    exit 1
+fi
+# Sanity check: every bottle must ship the rotated dequant family. This
+# is the exact kernel family v0.6.0 missed; failing loudly here prevents
+# the same regression silently slipping through future bottles. Use grep
+# -c (no early-exit) to dodge pipefail+SIGPIPE on strings.
+KERNEL_COUNT=$(strings "$GENERATED_METALLIB" | grep -c "turbo_dequant_rotated_4_256_bf16" || true)
+if [ "$KERNEL_COUNT" -eq 0 ]; then
+    echo "ERROR: metallib is missing turbo_dequant_rotated_4_256_bf16."
+    echo "  This is the regression v0.6.1 was cut to fix - refusing to publish."
+    exit 1
+fi
+echo "Metallib: $GENERATED_METALLIB ($(du -h "$GENERATED_METALLIB" | cut -f1))"
+
 # Package bottle
 echo "Packaging bottle..."
 rm -rf /tmp/vllm-swift-bottle
@@ -48,9 +87,8 @@ mkdir -p "$BOTTLE_DIR/lib" "$BOTTLE_DIR/libexec/vllm_swift" "$BOTTLE_DIR/libexec
 # Dylib
 cp "$DYLIB" "$BOTTLE_DIR/lib/"
 
-# Metallib
-METALLIB=$(find .build -name "mlx.metallib" -print -quit 2>/dev/null)
-[ -n "$METALLIB" ] && cp "$METALLIB" "$BOTTLE_DIR/lib/"
+# Metallib — use the explicit path we just built, not a `find` first-match.
+cp "$GENERATED_METALLIB" "$BOTTLE_DIR/lib/"
 
 # Python plugin
 cp "$PROJECT_DIR"/vllm_swift/*.py "$BOTTLE_DIR/libexec/vllm_swift/"
@@ -150,7 +188,7 @@ print(f'Downloaded to {p}')
     echo "Update complete."
     ;;
   version)
-    echo "vllm-swift 0.6.0"
+    echo "vllm-swift 0.6.1"
     echo "dylib: $PREFIX/lib/libVLLMBridge.dylib"
     [ -d "$VENV_DIR" ] && "$VENV_DIR/bin/python3" -c "import vllm; print(f'vLLM: {vllm.__version__}')" 2>/dev/null
     ;;

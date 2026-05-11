@@ -1,5 +1,27 @@
 # Release History
 
+## v0.6.1
+
+**Bugfix: ship the `turbo_dequant_rotated_*` kernel family in the bottle.**
+
+The v0.6.0 bottle's `mlx.metallib` was built from a stale `.build`
+checkout that predated the `turbo_dequant_rotated` Metal kernel family
+(added upstream in mlx-swift commit `8a5a74e`). Models with
+`head_dim=256` (e.g. Qwen3.5/3.6 27B-class) failed at engine init with:
+
+```
+Fatal error: [metal::Device] Unable to load kernel turbo_dequant_rotated_4_256_bf16
+```
+
+This release does a clean rebuild of the metallib so every
+`(bits ∈ {2,3,4,8}, dim ∈ {64,80,96,128,256,512}, dtype ∈ {bf16,f16})`
+variant is present. `head_dim=128` models on v0.6.0 (Qwen3-4B, Qwen3-8B,
+Qwen2.5-7B) were unaffected and continue to work.
+
+No source code change beyond version bumps.
+
+Reported by @heykb on M4 Pro 48G.
+
 ## v0.6.0
 
 **TriAttention V3 + longctx ChatSession integration; Gemma 4 MTP drafter.**
