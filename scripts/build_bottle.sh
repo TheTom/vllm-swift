@@ -29,6 +29,16 @@ BOTTLE_TAR="vllm-swift-${VERSION}.${MACOS_TAG}.bottle.tar.gz"
 echo "=== Building vllm-swift bottle v${VERSION} ==="
 echo ""
 
+# Pre-flight: every version-bearing file (pyproject.toml, __init__.py, this
+# script, homebrew/vllm-swift.rb) must agree. Catches the v0.6.1 drift mode
+# where the bottle and Homebrew formula were on 0.6.1 but the bundled
+# __init__.py still reported 0.5.4. Refusing to publish forces the bumps
+# before the artifact leaves this machine.
+bash "$SCRIPT_DIR/check_versions.sh" --quiet || {
+    echo "ERROR: version drift detected — re-run scripts/check_versions.sh to see details."
+    exit 1
+}
+
 # Build Swift bridge
 echo "Building Swift bridge (release)..."
 cd "$SWIFT_DIR"

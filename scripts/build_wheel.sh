@@ -16,13 +16,22 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SWIFT_BUILD_DIR="$REPO_ROOT/swift/.build/arm64-apple-macosx/release"
 LIB_SRC_DYLIB="$SWIFT_BUILD_DIR/libVLLMBridge.dylib"
 LIB_SRC_METALLIB="$SWIFT_BUILD_DIR/mlx.metallib"
 PKG_LIB_DIR="$REPO_ROOT/vllm_swift/_lib"
 
 PYTHON="${PYTHON:-python3}"
+
+# Pre-flight: refuse to build the wheel if any version-bearing file
+# disagrees with pyproject.toml. PyPI versions are immutable, so a wheel
+# uploaded with a stale __init__.py forces a 0.x.y+1 bump to fix.
+bash "$SCRIPT_DIR/check_versions.sh" --quiet || {
+    echo "ERROR: version drift detected — re-run scripts/check_versions.sh to see details." >&2
+    exit 1
+}
 
 echo "==> Building Swift bridge if needed..."
 if [ ! -f "$LIB_SRC_DYLIB" ]; then
