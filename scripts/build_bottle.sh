@@ -67,16 +67,11 @@ if [ ! -s "$GENERATED_METALLIB" ]; then
     cat "$METAL_LOG"
     exit 1
 fi
-# Sanity check: every bottle must ship the rotated dequant family. This
-# is the exact kernel family v0.6.0 missed; failing loudly here prevents
-# the same regression silently slipping through future bottles. Use grep
-# -c (no early-exit) to dodge pipefail+SIGPIPE on strings.
-KERNEL_COUNT=$(strings "$GENERATED_METALLIB" | grep -c "turbo_dequant_rotated_4_256_bf16" || true)
-if [ "$KERNEL_COUNT" -eq 0 ]; then
-    echo "ERROR: metallib is missing turbo_dequant_rotated_4_256_bf16."
-    echo "  This is the regression v0.6.1 was cut to fix - refusing to publish."
-    exit 1
-fi
+# Sanity check: run the full kernel-coverage verifier against the
+# metallib we are about to ship. Failing loudly here is the v0.6.0
+# postmortem — that bottle silently shipped without
+# turbo_dequant_rotated_* and we only learned at user runtime.
+bash "$SCRIPT_DIR/verify_metallib.sh" "$GENERATED_METALLIB"
 echo "Metallib: $GENERATED_METALLIB ($(du -h "$GENERATED_METALLIB" | cut -f1))"
 
 # Package bottle
