@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-swift"
-version = "0.6.1"
+version = "0.6.2"
 description = "vLLM Metal plugin powered by mlx-swift — high-performance LLM inference on Apple Silicon"
 readme = "README.md"
 license = { text = "Apache-2.0" }

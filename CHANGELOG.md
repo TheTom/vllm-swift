@@ -1,5 +1,58 @@
 # Release History
 
+## v0.6.2
+
+**ConfigI / Qwen3.5+ Aider-compat: auto-inject `enable_thinking=false`.**
+
+Qwen3.5+ chat templates default-open `<think>` in the assistant prompt.
+Reasoning-naive clients (Aider, OpenCode in chat mode, direct MCP
+callers) that don't pass `chat_template_kwargs={"enable_thinking": false}`
+got unbounded thinking content routed into `reasoning_content` while
+`content` stayed empty, producing an infinite retry loop. Symptom on
+ConfigI quantized MoE variants of Qwen3.6-35B-A3B; same failure
+reproduced on the standard 4-bit variant, so the fix lives at the
+reasoning-parser layer, not the model-name layer.
+
+### What's new
+
+- **`response_rewriter.rewrite_request` auto-injects
+  `chat_template_kwargs={"enable_thinking": false}`** when the resolved
+  reasoning parser is `qwen3` and the client did not pass the kwarg.
+  Reasoning-aware clients can still opt in by passing
+  `enable_thinking: true` explicitly; the rewriter preserves any
+  client-set value and merges with other `chat_template_kwargs`.
+  Symmetric to the existing tool-parser auto-injection, runs before the
+  budget-bump short-circuit so it fires on every qwen3 request,
+  including ones already at the `max_tokens` floor (Aider's exact case).
+- **Reverted the over-broad `-ConfigI-` suppress entry** in
+  `detect_reasoning_parser._REASONING_SUPPRESS_NAME_SUBSTRINGS`. That
+  earlier fix disabled the reasoning parser entirely. Wrong. Parser
+  stays on; the rewriter shapes the request.
+
+### Tests
+
+- 10 new tests in `tests/test_response_rewriter.py` pinning the
+  injection target set, every chat-template-kwargs shape (absent,
+  None, non-dict, explicit true, explicit false, merge with other
+  keys), scope guards (deepseek_r1, empty parser), and the ordering
+  guarantee that injection fires before the budget-bump short-circuit
+  and alongside it when both apply.
+- 4 new tests in `tests/test_detect_reasoning_parser.py` pinning the
+  `_REASONING_SUPPRESS_NAME_SUBSTRINGS` contents (Coder kept, ConfigI
+  absent regression guard) and the previously-untested end-to-end
+  substring suppression path via `model_dir_name`.
+
+### Validated
+
+`curl` against Qwen3.6-35B-A3B-ConfigI-MLX:
+- `content = clean python code (45 chars), reasoning_content = empty` ✓
+- 5K-token repetitive input: `content = "The code defines 500 functions..."`
+  (93 chars), no repetition loop ✓
+- Rewriter log fires on every request:
+  `auto-injected chat_template_kwargs.enable_thinking=False`
+
+ConfigI is now Aider-compatible without any client changes.
+
 ## v0.6.1
 
 **Bugfix: ship the `turbo_dequant_rotated_*` kernel family in the bottle.**

@@ -198,3 +198,69 @@ def test_main_silent_when_no_parser(tmp_path, monkeypatch, capsys):
     rc = drp.main()
     assert rc == 0
     assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Name-substring suppression
+#
+# `_REASONING_SUPPRESS_NAME_SUBSTRINGS` skips reasoning-parser auto-injection
+# when the model directory name matches certain tokens (e.g. `-Coder-`),
+# even though the architecture string would otherwise map to a thinking
+# parser. The suppress list previously contained `-ConfigI-`, which was
+# the wrong fix: it disabled the reasoning parser entirely. The real fix
+# lives in `response_rewriter._REASONING_PARSERS_WANT_ENABLE_THINKING_FALSE`
+# (auto-injects `chat_template_kwargs={"enable_thinking": false}`). Pin
+# both the kept entries and the absence of the reverted ones here so a
+# future merge can't silently regress.
+# ---------------------------------------------------------------------------
+
+
+def _make_thinking_qwen3(tmp_path):
+    """Helper: lay down a config.json + chat_template.jinja that would
+    otherwise resolve to the qwen3 parser. Reused by suppression tests
+    so each one only varies what we're actually testing (dir name)."""
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": ["Qwen3MoeForCausalLM"]}))
+    (tmp_path / "chat_template.jinja").write_text("uses <think>cot</think>")
+
+
+def test_suppress_substrings_contains_coder_kept():
+    """The `-Coder-` / `-coder-` entries are still load-bearing for the
+    Qwen3-Coder family (chat-only XML tool-call format, no thinking).
+    Pin presence so a refactor of the tuple doesn't drop them silently."""
+    assert "-Coder-" in drp._REASONING_SUPPRESS_NAME_SUBSTRINGS
+    assert "-coder-" in drp._REASONING_SUPPRESS_NAME_SUBSTRINGS
+
+
+def test_suppress_substrings_does_not_contain_configi():
+    """Regression guard: an earlier attempt added `-ConfigI-` here. That
+    was over-broad. The correct fix is rewriter-side (auto-inject
+    `enable_thinking: false`). If a future commit re-adds ConfigI to
+    this tuple without removing the rewriter handling, Aider clients
+    will lose `<think>`-aware behavior entirely instead of getting a
+    clean content-only response."""
+    assert "-ConfigI-" not in drp._REASONING_SUPPRESS_NAME_SUBSTRINGS
+    assert "-configi-" not in drp._REASONING_SUPPRESS_NAME_SUBSTRINGS
+
+
+def test_detect_parser_suppressed_by_coder_in_dir_name(tmp_path):
+    """End-to-end coverage of the substring suppression path that was
+    previously untested. Without a model_dir_name signal of Coder, the
+    same arch + template would return qwen3 (covered by
+    `test_detect_parser_full_match_qwen3`)."""
+    coder_dir = tmp_path / "Qwen3-Coder-30B-A3B-Instruct"
+    coder_dir.mkdir()
+    _make_thinking_qwen3(coder_dir)
+    assert drp.detect_parser(str(coder_dir)) == ""
+
+
+def test_detect_parser_returns_qwen3_for_configi_dir(tmp_path):
+    """Symmetric to the coder test, but in the opposite direction.
+    ConfigI must NOT be suppressed — it still wants the qwen3 parser
+    so vLLM can route `<think>` -> reasoning_content. The rewriter
+    layer is what makes Aider-compatible by tacking on
+    `enable_thinking: false`; this layer just keeps the parser hooked
+    up so reasoning-aware clients (who opt back in) still work."""
+    configi_dir = tmp_path / "Qwen3.6-35B-A3B-ConfigI-MLX"
+    configi_dir.mkdir()
+    _make_thinking_qwen3(configi_dir)
+    assert drp.detect_parser(str(configi_dir)) == "qwen3"

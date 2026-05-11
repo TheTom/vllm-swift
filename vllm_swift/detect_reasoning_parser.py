@@ -60,6 +60,13 @@ _NON_REASONING_NAME_SUFFIXES: tuple[str, ...] = (
 _REASONING_SUPPRESS_NAME_SUBSTRINGS: tuple[str, ...] = (
     "-Coder-",  # Qwen3-Coder, future Qwen-Coder family
     "-coder-",  # lowercase variants
+    # Note 2026-05-11: ConfigI family does NOT need a suppress entry — the
+    # proper fix is `rewrite_request` auto-injecting
+    # `chat_template_kwargs={"enable_thinking": false}` for the qwen3
+    # reasoning parser (see _REASONING_PARSERS_WANT_ENABLE_THINKING_FALSE
+    # in response_rewriter.py). Earlier `-ConfigI-` suppress entry was
+    # over-broad — it disabled the parser entirely instead of just
+    # changing the model's prompt to not start thinking. Removed.
 )
 
 # Architecture prefix -> vLLM reasoning parser name. Order matters: longer

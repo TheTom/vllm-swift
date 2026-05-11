@@ -199,6 +199,22 @@ _REASONING_MAX_TOKENS_FLOOR = 16384
 # Apple Silicon-friendly models so we don't blow KV cache budgets.
 _REASONING_MAX_TOKENS_BUMP = 32768
 
+# Reasoning parsers whose models' chat templates default-open `<think>` in
+# the assistant prompt (Qwen3.5+ family). On these, reasoning-naive clients
+# that don't pass `chat_template_kwargs={"enable_thinking": false}` get
+# unbounded thinking generation routed into `reasoning_content` while
+# `content` stays empty/null — Aider, OpenCode in chat mode, and direct
+# MCP callers all read `content` and see nothing → infinite retry loops.
+# We auto-inject the kwarg below in `rewrite_request`. Symmetric to the
+# existing auto-injection of `--enable-auto-tool-choice --tool-call-parser`.
+# Discovered 2026-05-11 on SWE-bench Aider against Qwen3.6-35B-A3B (both
+# ConfigI and standard 4-bit variants showed identical failure). Validated
+# by curl: `chat_template_kwargs={"enable_thinking": false}` alone makes
+# `content` populate correctly with clean output.
+_REASONING_PARSERS_WANT_ENABLE_THINKING_FALSE: frozenset[str] = frozenset(
+    {"qwen3"}
+)
+
 # Tool parsers known to occasionally fail to extract a structured tool_call
 # even when the model emitted the right shape (the call ends up as plain
 # text in `message.content`). When the auto-detected tool parser is in
@@ -579,6 +595,28 @@ def rewrite_request(
     side rewriter can stay arch-gated without a second plumbing pass.
     """
     del arch  # arch-gated rewrites all live on the response side
+
+    # Auto-inject `chat_template_kwargs={"enable_thinking": false}` for
+    # Qwen3.5+ thinking models when the client didn't pass the kwarg.
+    # See `_REASONING_PARSERS_WANT_ENABLE_THINKING_FALSE` comment block.
+    # Runs BEFORE the budget-bump short-circuit because this fix applies
+    # even to clients that already set max_tokens >= floor (Aider passes
+    # 16384 = the floor, so the bump never fires, but the kwarg injection
+    # still needs to). Reasoning-aware clients can override by passing
+    # `chat_template_kwargs={"enable_thinking": true}` explicitly.
+    if reasoning_parser in _REASONING_PARSERS_WANT_ENABLE_THINKING_FALSE:
+        existing_kwargs = body.get("chat_template_kwargs")
+        if not isinstance(existing_kwargs, dict):
+            existing_kwargs = {}
+        if "enable_thinking" not in existing_kwargs:
+            body["chat_template_kwargs"] = {**existing_kwargs,
+                                            "enable_thinking": False}
+            logger.info(
+                "auto-injected chat_template_kwargs.enable_thinking=False "
+                "(reasoning_parser=%s; client did not specify)",
+                reasoning_parser,
+            )
+
     if reasoning_parser not in _REASONING_PARSERS_NEEDING_BUDGET:
         return body
     requested = body.get("max_tokens")

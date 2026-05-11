@@ -24,6 +24,7 @@ import pytest
 from vllm_swift.response_rewriter import (
     _REASONING_MAX_TOKENS_BUMP,
     _REASONING_MAX_TOKENS_FLOOR,
+    _REASONING_PARSERS_WANT_ENABLE_THINKING_FALSE,
     _recover_tool_calls_from_content,
     rewrite_chat_completion,
     rewrite_request,
@@ -897,3 +898,145 @@ def test_replay_truncated_leak_response_skips_recovery_gracefully():
     assert msg["content"] == original_content
     assert not msg.get("tool_calls")
     assert payload["choices"][0]["finish_reason"] == "length"
+
+
+# ---------------------------------------------------------------------------
+# rewrite_request: auto-inject chat_template_kwargs.enable_thinking=False
+#
+# Qwen3.5+ chat templates default-open `<think>` in the assistant prompt.
+# Reasoning-naive clients (Aider, OpenCode chat mode) that don't pass
+# `chat_template_kwargs={"enable_thinking": false}` get unbounded thinking
+# routed into `reasoning_content` while `content` stays empty -> infinite
+# retry loop. Symmetric to the existing tool-parser auto-injection.
+#
+# Validated 2026-05-11 against Qwen3.6-35B-A3B-ConfigI-MLX via curl: the
+# kwarg alone makes `content` populate correctly with clean output.
+# ---------------------------------------------------------------------------
+
+
+def test_enable_thinking_false_qwen3_only():
+    """The injection target set must scope tightly to qwen3 for now.
+
+    Other reasoning parsers (deepseek_r1, gpt-oss, gemma4, ...) don't share
+    the default-open-think template behavior. Bumping the set without
+    matching template evidence would risk silently silencing thinking on
+    other families.
+    """
+    assert _REASONING_PARSERS_WANT_ENABLE_THINKING_FALSE == frozenset({"qwen3"})
+
+
+def test_injects_enable_thinking_false_for_qwen3_when_kwargs_absent():
+    """The headline behavior — qwen3 parser + no chat_template_kwargs ->
+    rewriter adds `enable_thinking: false`. This is the Aider/OpenCode
+    repro: client sends nothing, model emits thinking forever, content
+    stays null. Injection forces a clean answer-only response."""
+    body = {"max_tokens": 65536, "messages": []}
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    assert out["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_injects_enable_thinking_false_when_chat_template_kwargs_is_none():
+    """`chat_template_kwargs` present but explicitly None — same as absent.
+    Some clients always send the key even when they have nothing to put in
+    it, so the rewriter must treat None like 'no entry'."""
+    body = {"max_tokens": 65536, "messages": [], "chat_template_kwargs": None}
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    assert out["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_injects_enable_thinking_false_when_chat_template_kwargs_not_dict():
+    """Defensive: clients that send the wrong type (string, list) must not
+    cause a crash, and the rewriter still applies the safe default. The
+    isinstance guard in the rewriter is what we're pinning here."""
+    body = {"max_tokens": 65536, "messages": [], "chat_template_kwargs": "garbage"}
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    assert out["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_preserves_explicit_enable_thinking_true():
+    """Reasoning-aware clients can opt back into thinking by passing
+    `enable_thinking: true` explicitly. The rewriter must leave that
+    alone — otherwise the auto-inject would silently break workflows
+    that genuinely want chain-of-thought."""
+    body = {
+        "max_tokens": 65536,
+        "messages": [],
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    assert out["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_preserves_explicit_enable_thinking_false():
+    """Idempotency: if the client already sent the right value, the
+    rewriter must not 'helpfully' double-set it or otherwise touch the
+    dict."""
+    body = {
+        "max_tokens": 65536,
+        "messages": [],
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    assert out["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_preserves_other_chat_template_kwargs_while_injecting():
+    """Other kwargs (model-specific template knobs) must survive the
+    merge. The injection only adds `enable_thinking` when missing; it
+    does not replace the entire dict."""
+    body = {
+        "max_tokens": 65536,
+        "messages": [],
+        "chat_template_kwargs": {"system_role": "system", "add_generation_prompt": True},
+    }
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    assert out["chat_template_kwargs"] == {
+        "system_role": "system",
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }
+
+
+def test_no_injection_for_non_qwen3_reasoning_parser():
+    """deepseek_r1 / gpt-oss / gemma4 etc. — their chat templates don't
+    default-open `<think>`, so the injection must not fire. Different
+    template, different bug; one auto-inject doesn't fit all."""
+    body = {"max_tokens": 65536, "messages": []}
+    out = rewrite_request(body, arch="DeepseekR1ForCausalLM", reasoning_parser="deepseek_r1")
+    assert "chat_template_kwargs" not in out
+
+
+def test_no_injection_when_no_reasoning_parser():
+    """No reasoning parser detected -> nothing to defend against.
+    `enable_thinking` is a Qwen3-template concept; passing it to models
+    whose templates don't read the kwarg is a silent no-op at best and
+    a template error at worst on stricter Jinja envs."""
+    body = {"max_tokens": 65536, "messages": []}
+    out = rewrite_request(body, arch="LlamaForCausalLM", reasoning_parser="")
+    assert "chat_template_kwargs" not in out
+
+
+def test_injection_fires_before_max_tokens_short_circuit():
+    """The headline regression: Aider sends `max_tokens = 16384` exactly
+    (the floor), so the budget-bump short-circuits without modifying the
+    body. The thinking-injection must NOT live inside the bump branch —
+    it has to run on every qwen3 request, regardless of whether the bump
+    fires. Pin that ordering here so a future refactor can't move the
+    injection inside the bump block."""
+    body = {"max_tokens": _REASONING_MAX_TOKENS_FLOOR, "messages": []}
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    # max_tokens unchanged — confirms the bump short-circuited
+    assert out["max_tokens"] == _REASONING_MAX_TOKENS_FLOOR
+    # …and yet the injection still fired
+    assert out["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_injection_and_bump_both_fire_when_starved():
+    """The combined-rewrites path: starved max_tokens (8192) on qwen3 ->
+    both the kwarg injection AND the max_tokens bump apply on the same
+    request. Catches the case where short-circuiting one rewrite
+    accidentally skips the other."""
+    body = {"max_tokens": 8192, "messages": []}
+    out = rewrite_request(body, arch="Qwen3MoeForCausalLM", reasoning_parser="qwen3")
+    assert out["max_tokens"] == _REASONING_MAX_TOKENS_BUMP
+    assert out["chat_template_kwargs"] == {"enable_thinking": False}
