@@ -135,6 +135,36 @@ if [ ! -s "$BUILD_DIR/mlx.metallib" ]; then
 fi
 echo ""
 
+# Also refresh the bundled artifacts inside the Python package's `_lib/`.
+#
+# The package's `vllm_swift/__init__.py:_add_bundled_lib_to_dyld()` appends
+# `vllm_swift/_lib/` to DYLD_LIBRARY_PATH at import time. User-set values
+# (e.g. `activate.sh` pointing at $BUILD_DIR) win, but if nothing is set the
+# bundled `_lib/` is the only path the loader has. A stale dylib there then
+# loads at runtime with a stale ABI: launching `vllm serve` after a clean
+# source build dies with `dlsym(..., <new_symbol>): symbol not found`.
+#
+# Keep `_lib/` in sync with the build output so source installs, pip-editable
+# installs, and bottle installs all see the same artifacts.
+LIB_DIR="$PROJECT_DIR/vllm_swift/_lib"
+mkdir -p "$LIB_DIR"
+cp "$DYLIB" "$LIB_DIR/libVLLMBridge.dylib"
+cp "$BUILD_DIR/mlx.metallib" "$LIB_DIR/mlx.metallib"
+echo "  Refreshed: $LIB_DIR/libVLLMBridge.dylib"
+echo "  Refreshed: $LIB_DIR/mlx.metallib"
+echo ""
+
+# Sanity check: a known-good source build of feature/m5-baseline exports
+# vsm_engine_get_batch_tokens. If it's missing here, either the build didn't
+# update the dylib or the copy above silently failed.
+if ! nm "$LIB_DIR/libVLLMBridge.dylib" 2>/dev/null | grep -q "_vsm_engine_get_batch_tokens"; then
+    echo "WARNING: _lib/libVLLMBridge.dylib is missing the vsm_engine_get_batch_tokens"
+    echo "  symbol expected by vllm_swift/engine_bridge.py. The dylib may be stale or"
+    echo "  the build did not include the batched-uniform prefill stash. Aborting."
+    exit 1
+fi
+echo ""
+
 # Find Python 3.10-3.13 (vLLM doesn't support 3.14+)
 _find_python() {
     for p in python3.13 python3.12 python3.11 python3.10; do

@@ -208,6 +208,103 @@ def test_metallib_recognised_by_file_command(metallib_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# install.sh `_lib/` mirror coverage.
+#
+# install.sh copies the freshly-built libVLLMBridge.dylib + mlx.metallib into
+# vllm_swift/_lib/ so that pip-editable installs and bottle-style installs all
+# see the same artifacts. A stale `_lib/` is the same failure shape as a stale
+# bottle metallib (issue #7 / v0.6.0): the loader silently picks the wrong
+# file and dies at runtime.
+#
+# These tests skip when no `_lib/` mirror exists (fresh clone, no install yet)
+# so they don't force a swift build inside pytest.
+# ---------------------------------------------------------------------------
+
+# Symbol that install.sh's nm-grep sanity check looks for. It marks the
+# batched-uniform prefill stash (vllm-swift commit 3389805), which is the
+# floor for what feature/m5-baseline ships. If the `_lib/` dylib doesn't
+# export it, install.sh refused to publish — so neither should the bottle.
+EXPECTED_BRIDGE_SYMBOL = "_vsm_engine_get_batch_tokens"
+
+LIB_DIR = REPO_ROOT / "vllm_swift" / "_lib"
+
+
+@pytest.fixture(scope="module")
+def lib_dylib_path() -> Path:
+    """Locate vllm_swift/_lib/libVLLMBridge.dylib or skip."""
+    candidate = LIB_DIR / DYLIB_NAME
+    if not candidate.is_file():
+        pytest.skip(
+            f"No vllm_swift/_lib/{DYLIB_NAME} mirror found. "
+            f"Run `./scripts/install.sh` to populate it."
+        )
+    return candidate
+
+
+def test_lib_dir_mirrors_dylib(install_dir: Path, lib_dylib_path: Path) -> None:
+    """install.sh copies the build-output dylib into `_lib/` after building.
+
+    Whatever's in `_lib/` must be at least as fresh as the dylib actually
+    built into swift/.build/. install.sh enforces this via `cp`; this test
+    catches the case where the copy silently no-ops (e.g. permissions).
+    """
+    build_dylib = install_dir / DYLIB_NAME
+    assert build_dylib.is_file(), f"Build dylib missing at {build_dylib}"
+    build_mtime = build_dylib.stat().st_mtime
+    lib_mtime = lib_dylib_path.stat().st_mtime
+    # `_lib/` should be at least as fresh as the build artifact. We allow a
+    # small clock-skew tolerance because `cp` and `stat` aren't atomic — the
+    # mtime granularity on some filesystems is whole seconds.
+    assert lib_mtime >= build_mtime - 2, (
+        f"_lib/{DYLIB_NAME} is older than the build artifact. "
+        f"install.sh did not refresh `_lib/` — possible silent cp failure."
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("nm") is None,
+    reason="nm not available — skipping symbol table inspection",
+)
+def test_lib_dylib_contains_expected_bridge_symbol(lib_dylib_path: Path) -> None:
+    """The `_lib/` dylib must export the bridge symbols engine_bridge.py calls.
+
+    install.sh's own nm-grep gate enforces this before refusing to publish.
+    We re-check from the test side so a manually-edited `_lib/` (e.g. someone
+    copied an older dylib in by hand) still gets caught.
+    """
+    result = subprocess.run(
+        ["nm", str(lib_dylib_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"nm failed on {lib_dylib_path}: {result.stderr.strip()}")
+    assert EXPECTED_BRIDGE_SYMBOL in result.stdout, (
+        f"{lib_dylib_path} is missing {EXPECTED_BRIDGE_SYMBOL}. "
+        f"This is the symbol install.sh's sanity check looks for — the "
+        f"`_lib/` mirror is stale. Re-run scripts/install.sh."
+    )
+
+
+def test_lib_dir_has_metallib_too(lib_dylib_path: Path) -> None:
+    """install.sh mirrors both the dylib AND the metallib into `_lib/`."""
+    metallib = LIB_DIR / METALLIB_NAME
+    assert metallib.is_file(), (
+        f"_lib/{METALLIB_NAME} missing alongside the dylib. "
+        f"install.sh refresh of `_lib/` is incomplete."
+    )
+    # Metal magic check, same as the install_dir version above. Catches the
+    # case where `_lib/mlx.metallib` got truncated or replaced with garbage.
+    with metallib.open("rb") as f:
+        magic = f.read(4)
+    assert magic == METALLIB_MAGIC, (
+        f"_lib/{METALLIB_NAME} is not a Metal library — got magic {magic!r}."
+    )
+
+
 # TODO: When CI gains a runner that reliably executes ./scripts/install.sh
 # end-to-end, add a slow-marked test that wipes swift/.build/arm64-apple-macosx
 # and reruns install.sh, asserting the metallib reappears. Skipped here to keep

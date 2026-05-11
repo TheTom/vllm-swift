@@ -16,7 +16,7 @@ class VllmSwift < Formula
 
   bottle do
     root_url "https://github.com/TheTom/homebrew-tap/releases/download/bottles"
-    sha256 cellar: :any, arm64_tahoe:   "3327ca304c221826518c91f0724f00a0a1f4d3525ec02241f2571a71cb14a71d"
+    sha256 cellar: :any, arm64_tahoe:   "0754485da1f3dad7c0728795aa5eea3d5bb15482f4ae475d42b327871f732998"
     # arm64_sequoia + arm64_sonoma SHAs to be filled by mirror builds on
     # those macOS versions. Until then, sequoia / sonoma users build from
     # source (HOMEBREW_NO_SANDBOX=1 brew install vllm-swift).

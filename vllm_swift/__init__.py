@@ -4,7 +4,7 @@
 import os
 import sys
 
-__version__ = "0.5.4"
+__version__ = "0.6.1"
 
 
 def _apply_macos_defaults() -> None:
@@ -22,9 +22,17 @@ def _apply_macos_defaults() -> None:
 
 
 def _add_bundled_lib_to_dyld() -> None:
-    """Prepend the package's _lib/ to DYLD_LIBRARY_PATH so the Swift bridge
-    dylib is discoverable when the user invokes `vllm-swift serve` directly
-    or imports the plugin from a non-Homebrew install (e.g. pip wheel).
+    """Add the package's `_lib/` to DYLD_LIBRARY_PATH so the bundled Swift
+    bridge dylib is discoverable for pip-wheel and Homebrew-bottle installs
+    that ship a prebuilt dylib next to the Python package.
+
+    The path is APPENDED, not prepended. If the user has set
+    DYLD_LIBRARY_PATH themselves (e.g. via `source activate.sh` from a
+    source install that points at `swift/.build/<config>/`), their entry
+    takes precedence over the bundled fallback. This avoids the failure
+    mode where a stale `_lib/` dylib silently shadows a freshly-built one
+    in `swift/.build/`, surfacing as `dlsym(..., <new_symbol>): symbol not
+    found` on import.
     """
     if sys.platform != "darwin":
         return
@@ -34,7 +42,7 @@ def _add_bundled_lib_to_dyld() -> None:
     existing = os.environ.get("DYLD_LIBRARY_PATH", "")
     if lib in existing.split(":"):
         return
-    os.environ["DYLD_LIBRARY_PATH"] = f"{lib}:{existing}" if existing else lib
+    os.environ["DYLD_LIBRARY_PATH"] = f"{existing}:{lib}" if existing else lib
 
 
 def register() -> str | None:
