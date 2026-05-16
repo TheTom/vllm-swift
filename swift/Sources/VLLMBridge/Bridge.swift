@@ -58,6 +58,36 @@ struct RequestSession {
     var topP: Float
 }
 
+/// Per-request session for the F-83 sparse decode (RetrievalAttention)
+/// path. Lives alongside `RequestSession` (regular dense path) — they
+/// are mutually exclusive per request. The sparse path bypasses
+/// `TokenIterator` because TokenIterator's `model(...)` invocation goes
+/// through the dense-only `callAsFunction(_:cache:)` overload, with no
+/// way to thread the `raContexts:` side-channel through it.
+///
+/// Activation: `VSM_SPARSE=1` env var at `vsm_engine_create` time. Only
+/// engages for `Qwen2Model` (the F-83 north-star validated model). All
+/// other models fall through to the dense path even when the env var is
+/// set.
+///
+/// Memory: same as dense — per-layer `StandardKVCache` storing the full
+/// post-RoPE K/V. The sparse win is in the per-step SDPA shape (gathers
+/// ~2k positions of the cache instead of the full T at 128K), not in
+/// cache storage.
+struct SparseSession {
+    /// Per-layer KV cache; identical to what TokenIterator would build
+    /// in the dense default path. Sparse decode gathers from this.
+    var cache: [KVCache]
+    /// Per-layer `RetrievalAttentionContext?`. nil entries mark
+    /// dense-band layers (first-N + last-N). `prefillUpdate` is invoked
+    /// automatically by `retrievalAttentionStep` on prefill chunks.
+    var raContexts: [RetrievalAttentionContext?]
+    /// Last sampled token to feed into the next decode step.
+    var nextToken: Int32
+    var temperature: Float
+    var topP: Float
+}
+
 /// Holds model + all active request sessions.
 final class InferenceEngine {
     let model: any LanguageModel
@@ -67,6 +97,20 @@ final class InferenceEngine {
 
     /// Active sessions keyed by request ID (supports concurrent requests)
     var sessions: [String: RequestSession] = [:]
+    /// F-83 RetrievalAttention sparse-decode sessions. Mutually exclusive
+    /// per request with `sessions` — when `sparseEnabled` is on and the
+    /// model is Qwen2, prefill+decode go here instead.
+    var sparseSessions: [String: SparseSession] = [:]
+    /// When true, `vsm_engine_prefill_req` builds a `SparseSession` and
+    /// drives prefill+decode through the F-83 sparse path. Set from
+    /// `VSM_SPARSE=1` at engine create. Only honored for Qwen2Model.
+    var sparseEnabled: Bool = false
+    /// RoPE base parsed from the model's config.json at engine-create
+    /// time. Used to construct each request's `RetrievalAttentionContext`
+    /// so the selector index's trig features stay aligned with the
+    /// model's positional encoding. Defaults to 10_000 if unparseable;
+    /// Qwen2.5-14B-Instruct-1M reports 10_000_000.
+    var ropeBase: Float = 10_000
     var generateParams: GenerateParameters
 
     /// Cap on concurrent batched-decode slots. Drives BatchedKVCache
@@ -270,6 +314,42 @@ public func vsm_engine_create(
     print("[vsm] Engine create: maxNumSeqs=\(engine.maxConcurrentRequests) "
           + "maxKVSize=\(engine.maxKVSize)")
 
+    // F-83 sparse decode activation. Two equivalent triggers:
+    //   1. `VSM_SPARSE=1` env var (simplest for spike + harness).
+    //   2. `kvScheme="sparse"` (so callers that already thread kvScheme
+    //      through can opt in without touching env).
+    // Either one flips `engine.sparseEnabled`. The actual sparse routing
+    // happens in `vsm_engine_prefill_req` / `vsm_engine_decode_*` and is
+    // gated additionally on `model is Qwen2Model` — the only family with
+    // the `raContexts:` overload landed today.
+    let envSparse = ProcessInfo.processInfo.environment["VSM_SPARSE"] == "1"
+    let schemeSparse = (kvScheme.map { String(cString: $0) } ?? "") == "sparse"
+    engine.sparseEnabled = envSparse || schemeSparse
+    if engine.sparseEnabled {
+        // Parse rope_theta from the model's config.json so the selector
+        // index's trig features track the model's positional encoding.
+        // Qwen2.5-14B-Instruct-1M uses 10_000_000, not the default 10_000.
+        let configURL = modelURL.appendingPathComponent("config.json")
+        if let data = try? Data(contentsOf: configURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let v = json["rope_theta"] as? Double {
+                engine.ropeBase = Float(v)
+            } else if let v = json["rope_theta"] as? Int {
+                engine.ropeBase = Float(v)
+            }
+        }
+        let qwen2 = engine.model is Qwen2Model
+        print("[vsm] F-83 sparse decode ENABLED (VSM_SPARSE=\(envSparse) "
+              + "kvScheme=\(schemeSparse ? "sparse" : "other") "
+              + "model=\(type(of: engine.model)) qwen2Compatible=\(qwen2) "
+              + "ropeBase=\(engine.ropeBase))")
+        if !qwen2 {
+            print("[vsm] WARNING: sparse decode requested but model is not "
+                  + "Qwen2Model — will fall through to dense path. F-83 "
+                  + "raContexts overload only wired on Qwen2 today.")
+        }
+    }
+
     // Create stable pointer as opaque handle
     let ptr = Unmanaged.passRetained(engine).toOpaque()
     let handle = UnsafeMutableRawPointer(ptr)
@@ -393,6 +473,20 @@ public func vsm_engine_prefill_req(
         guard let engine = engines[handle] else { return Int32(-1) }
 
         let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
+
+        // F-83 sparse prefill+first-token path. Engages when sparse is
+        // requested AND the model has the `raContexts:` overload
+        // (Qwen2Model only). All other configs fall through to the
+        // legacy dense TokenIterator path. The sparse session is stored
+        // in `sparseSessions[rid]`; subsequent decode steps for this
+        // rid go through `sparseDecodeStep(...)`.
+        if engine.sparseEnabled, let qwen2Model = engine.model as? Qwen2Model {
+            return sparsePrefillFirstToken(
+                engine: engine, qwen2Model: qwen2Model, rid: rid,
+                tokens: tokens, temperature: temperature, topP: topP
+            )
+        }
+
         let tokenArray = MLXArray(tokens)
 
         var params = engine.generateParams
@@ -422,6 +516,110 @@ public func vsm_engine_prefill_req(
             return Int32(-1)
         }
     }
+}
+
+/// F-83 sparse-prefill helper. Drives prefill chunk-by-chunk through
+/// `Qwen2Model.callAsFunction(_:cache:raContexts:)`, populating the
+/// per-layer `RetrievalAttentionContext.batchedIndex` selector via the
+/// dispatcher's `prefillUpdate` side-channel (see `retrievalAttentionStep`).
+/// Returns the first sampled token (greedy argmax for the spike — matches
+/// `params.temperature == 0` default).
+///
+/// On error the function logs + returns -1 and no `SparseSession` is
+/// inserted; subsequent decode_step calls will return -1 cleanly.
+private func sparsePrefillFirstToken(
+    engine: InferenceEngine,
+    qwen2Model: Qwen2Model,
+    rid: String,
+    tokens: [Int],
+    temperature: Float,
+    topP: Float
+) -> Int32 {
+    let nLayers = qwen2Model.kvHeads.count
+    // Per-layer dense KV caches; same storage shape as the dense default.
+    // `StandardKVCache()` is unbounded — fine for the bench harness which
+    // sets `maxKVSize=0` (= unbounded). For windowed caches the F-83
+    // selector is undefined; reject early to keep semantics clear.
+    if engine.maxKVSize > 0 {
+        print("[vsm] sparse prefill: refusing maxKVSize>0 (windowed) — "
+              + "sparse path requires unbounded StandardKVCache")
+        return -1
+    }
+    let cache: [KVCache] = (0..<nLayers).map { _ in
+        StandardKVCache() as KVCache
+    }
+    // Default RA config. Knobs that matter at long ctx:
+    //   - adaptiveTopK (default true) → k_padded ≈ ceil(T/256) at 128K,
+    //     so K shape collapses from T=131072 to ~512+sliding+coarse ~3k.
+    //   - sparseMinContext (default 16384) → below 16K the dispatcher
+    //     falls through to plain dense SDPA per-layer (zero overhead),
+    //     so short-context benches don't regress.
+    //   - useFusedMaskBuild (default true) → F-73 fused mask kernel.
+    let raCfg = RetrievalAttentionConfig()
+    let raContexts: [RetrievalAttentionContext?] = (0..<nLayers).map { i in
+        RetrievalAttentionContext(
+            layerIdx: i, totalLayers: nLayers,
+            raConfig: raCfg, ropeBase: engine.ropeBase
+        )
+    }
+
+    // Chunked prefill. Use the model's `defaultPrefillStepSize` (1024 for
+    // Qwen2 by default — see LanguageModel extension). Each chunk goes
+    // through the model's `raContexts:` overload so the dispatcher
+    // populates the selector index (`prefillUpdate`) for the sparse-band
+    // layers. The final chunk's last-token logits feed the first sampled
+    // token (greedy/argmax for the bench harness).
+    let chunkSize = qwen2Model.defaultPrefillStepSize
+    let n = tokens.count
+    var lastLogits: MLXArray? = nil
+
+    for chunkStart in stride(from: 0, to: n, by: chunkSize) {
+        let chunkEnd = min(chunkStart + chunkSize, n)
+        let chunkTokens = Array(tokens[chunkStart..<chunkEnd])
+        let chunkArray = MLXArray(chunkTokens).reshaped(1, chunkTokens.count)
+        let isLast = chunkEnd == n
+
+        let out = qwen2Model.callAsFunction(
+            chunkArray, cache: cache, raContexts: raContexts
+        )
+        if isLast {
+            eval(out)
+            lastLogits = out[0, -1, 0...]
+        } else {
+            // Materialise the cache writes for this chunk before queuing
+            // the next forward — mirrors the F-83 256K bench's
+            // `asyncEval(cache state)` pattern but uses sync `eval` here
+            // for the bench-sized prompts (≤128K) where the simpler path
+            // is safer to ship.
+            var arrays: [MLXArray] = []
+            for c in cache { arrays.append(contentsOf: c.innerState()) }
+            eval(arrays)
+        }
+    }
+
+    guard let logits = lastLogits else {
+        print("[vsm] sparse prefill produced no logits for \(rid)")
+        return -1
+    }
+
+    // Greedy sample for the bench harness (params.temperature=0 by
+    // default). Temperature sampling can be added later — out of scope
+    // for the F-83 perf-validation spike.
+    let token: Int32 = {
+        if temperature > 0 {
+            let scaled = logits / temperature
+            let sampled = MLXRandom.categorical(scaled)
+            return Int32(sampled.item(Int.self))
+        } else {
+            return argMax(logits, axis: -1).asType(.int32).item(Int32.self)
+        }
+    }()
+
+    engine.sparseSessions[rid] = SparseSession(
+        cache: cache, raContexts: raContexts,
+        nextToken: token, temperature: temperature, topP: topP
+    )
+    return token
 }
 
 /// Compute prompt logprobs: for each position i, the log-probability of token[i+1]
@@ -474,8 +672,29 @@ public func vsm_engine_decode_step_req(
     let rid = String(cString: reqId)
 
     return engineQueue.sync { () -> Int32 in
-        guard let engine = engines[handle],
-              var session = engine.sessions[rid] else { return Int32(-1) }
+        guard let engine = engines[handle] else { return Int32(-1) }
+
+        // F-83 sparse decode path. When a `SparseSession` exists for
+        // `rid`, route through the RetrievalAttention dispatcher
+        // (gathers ~2k positions of K/V at 128K instead of T). The
+        // dense path stays the default for non-sparse rids.
+        if var sparse = engine.sparseSessions[rid],
+           let qwen2Model = engine.model as? Qwen2Model {
+            let start = CFAbsoluteTimeGetCurrent()
+            let token = sparseDecodeStep(
+                qwen2Model: qwen2Model, session: &sparse,
+                stream: engine.decodeStream
+            )
+            engine.sparseSessions[rid] = sparse
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            engine.totalDecodeTokens += 1
+            engine.totalDecodeTime += elapsed
+            engine.peakMemoryBytes = max(
+                engine.peakMemoryBytes, Int64(Memory.peakMemory))
+            return token
+        }
+
+        guard var session = engine.sessions[rid] else { return Int32(-1) }
 
         let start = CFAbsoluteTimeGetCurrent()
         guard let token = session.iterator.next() else {
@@ -493,6 +712,43 @@ public func vsm_engine_decode_step_req(
 
         return Int32(token)
     }
+}
+
+/// F-83 sparse decode step. Mirrors the F-83 256K bench's `runDecode`
+/// inner loop: feed `nextToken` as `[1, 1]`, run model forward through
+/// the sparse dispatcher, argmax the last logit, return the previously-
+/// sampled token (previousY pattern, matching `TokenIterator.next()`).
+///
+/// Per-step cost at 128K on Qwen2.5-14B-1M-4bit:
+///   - Dense: ~67ms (Python mlx_lm reference) / ~78ms (Swift bare).
+///   - Sparse (F-83 north-star): ~34ms.
+/// Below the `sparseMinContext` threshold (16K by default) the
+/// dispatcher transparently falls through to plain dense SDPA per layer,
+/// so this path is parity with the dense path at short context.
+private func sparseDecodeStep(
+    qwen2Model: Qwen2Model,
+    session: inout SparseSession,
+    stream: MLX.Stream
+) -> Int32 {
+    let prev = session.nextToken
+    let input = MLXArray([prev]).reshaped(1, 1)
+    let token: Int32 = MLX.Stream.withStream(stream) {
+        let out = qwen2Model.callAsFunction(
+            input, cache: session.cache, raContexts: session.raContexts
+        )
+        let lastLogits = out[0, -1, 0...]
+        let t: MLXArray
+        if session.temperature > 0 {
+            let scaled = lastLogits / session.temperature
+            t = MLXRandom.categorical(scaled).asType(.int32)
+        } else {
+            t = argMax(lastLogits, axis: -1).asType(.int32)
+        }
+        eval(t)
+        return t.item(Int32.self)
+    }
+    session.nextToken = token
+    return prev
 }
 
 /// Generic fully-batched decode runner shared across the Qwen2/Llama/Gemma3/
@@ -666,6 +922,34 @@ public func vsm_engine_decode_all(
         guard let engine = engines[handle] else { return Int32(0) }
 
         let start = CFAbsoluteTimeGetCurrent()
+
+        // F-83 sparse decode dispatch. When any `SparseSession`s exist,
+        // walk them sequentially (per-request) — no batched-sparse path
+        // exists yet (the model's `raContexts:` overload is single-batch
+        // only). At B=1 (the F-83 north-star target) this is the entire
+        // decode loop. At B>1 it's a sequential fallback; pair sparse
+        // with B=1 for the validated 2× win at 128K, or use the dense
+        // batched path for higher B.
+        if !engine.sparseSessions.isEmpty,
+           let qwen2Model = engine.model as? Qwen2Model {
+            let sparseRids = Array(engine.sparseSessions.keys.prefix(Int(maxReqs)))
+            var count: Int32 = 0
+            for rid in sparseRids {
+                guard var sparse = engine.sparseSessions[rid] else { continue }
+                let prev = sparseDecodeStep(
+                    qwen2Model: qwen2Model, session: &sparse,
+                    stream: engine.decodeStream)
+                engine.sparseSessions[rid] = sparse
+                reqIds[Int(count)] = strdup(rid)
+                outTokens[Int(count)] = prev
+                count += 1
+            }
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            engine.totalDecodeTokens += count
+            engine.totalDecodeTime += elapsed
+            return count
+        }
+
         // Pull active rids from sessions, falling back to batchSlots when the
         // batched-prefill path was used (it skips per-request session setup
         // because RequestSession requires a TokenIterator we don't have).
@@ -1821,6 +2105,7 @@ public func vsm_engine_finish_req(
     engineQueue.sync {
         guard let engine = engines[handle] else { return }
         engine.sessions.removeValue(forKey: rid)
+        engine.sparseSessions.removeValue(forKey: rid)
     }
 }
 
@@ -1887,6 +2172,7 @@ public func vsm_engine_reset(_ handle: UnsafeMutableRawPointer?) {
     engineQueue.sync {
         guard let engine = engines[handle] else { return }
         engine.sessions.removeAll()
+        engine.sparseSessions.removeAll()
     }
 }
 
