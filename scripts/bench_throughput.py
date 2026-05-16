@@ -38,7 +38,12 @@ for i, arg in enumerate(sys.argv):
         PROMPTS_MODE = sys.argv[i + 1]
         assert PROMPTS_MODE in ("identical", "unique"), PROMPTS_MODE
 
-CONCURRENCY_LEVELS = [1, 8, 32, 64]
+# BENCH_B env var overrides the default sweep with a single B (used by
+# task #126 sparse-decode characterization where B>1 would OOM at 128K).
+if os.environ.get("BENCH_B"):
+    CONCURRENCY_LEVELS = [int(os.environ["BENCH_B"])]
+else:
+    CONCURRENCY_LEVELS = [1, 8, 32, 64]
 
 # Load dylib
 SWIFT_BUILD = Path(__file__).parent.parent / "swift" / ".build" / "arm64-apple-macosx"

@@ -545,23 +545,102 @@ private func sparsePrefillFirstToken(
               + "sparse path requires unbounded StandardKVCache")
         return -1
     }
+    // F-83 task #126 — size the inner cache to `prefill + decode budget`
+    // in one allocation so neither prefill chunks nor decode steps trip
+    // the per-write reallocation path in `StandardKVCache.updateUnbounded`
+    // (each realloc is a full-cache concat that surges memory and shows
+    // up on the lazy graph). Matches the F-83 256K bench's
+    // `stepDefault = prefillLen + nDecode + 1024` recipe.
+    let envEarly = ProcessInfo.processInfo.environment
+    let decodeBudget = envEarly["VSM_SPARSE_DECODE_BUDGET"]
+        .flatMap(Int.init) ?? 256
+    let cacheStep = tokens.count + max(decodeBudget, 256)
     let cache: [KVCache] = (0..<nLayers).map { _ in
-        StandardKVCache() as KVCache
+        StandardKVCache(eviction: .unbounded, step: cacheStep) as KVCache
     }
-    // Default RA config. Knobs that matter at long ctx:
-    //   - adaptiveTopK (default true) → k_padded ≈ ceil(T/256) at 128K,
-    //     so K shape collapses from T=131072 to ~512+sliding+coarse ~3k.
-    //   - sparseMinContext (default 16384) → below 16K the dispatcher
-    //     falls through to plain dense SDPA per-layer (zero overhead),
-    //     so short-context benches don't regress.
-    //   - useFusedMaskBuild (default true) → F-73 fused mask kernel.
-    let raCfg = RetrievalAttentionConfig()
-    let raContexts: [RetrievalAttentionContext?] = (0..<nLayers).map { i in
+    // F-83 task #126 — env-controllable RA config so we can A/B the
+    // F-73 fused-mask (current default, ~89 ms/step at 128K sidecar) vs
+    // F-70 per-KV-head gather + amortization (~161 ms at default knobs,
+    // potentially better with tighter fineBlockSize / no-adaptive).
+    //
+    //   VSM_SPARSE_PER_HEAD_GATHER=1  → use F-70 path instead of F-73 mask
+    //   VSM_SPARSE_FINE_BS=N          → override fineBlockSize (default 64)
+    //   VSM_SPARSE_FINE_TOPK=N        → override fineTopK (default 32)
+    //   VSM_SPARSE_NO_ADAPTIVE=1      → disable adaptive top-K (caps K_padded)
+    //   VSM_SPARSE_COARSE_TOPK=N      → override coarseTopK (default 2)
+    //   VSM_SPARSE_AMORT=N            → override selectorAmortization (default 16)
+    //
+    // Defaults preserve the prior shipped behavior; without any env vars
+    // set this matches the pre-#126 path exactly.
+    var raCfg = RetrievalAttentionConfig()
+    let env = envEarly
+    if env["VSM_SPARSE_PER_HEAD_GATHER"] == "1" {
+        raCfg.usePerKVHeadGather = true
+        raCfg.useFusedMaskBuild = false
+    }
+    if let v = env["VSM_SPARSE_FINE_BS"].flatMap(Int.init) {
+        raCfg.fineBlockSize = v
+    }
+    if let v = env["VSM_SPARSE_FINE_TOPK"].flatMap(Int.init) {
+        raCfg.fineTopK = v
+    }
+    if env["VSM_SPARSE_NO_ADAPTIVE"] == "1" {
+        raCfg.adaptiveTopK = false
+    }
+    if let v = env["VSM_SPARSE_COARSE_TOPK"].flatMap(Int.init) {
+        raCfg.coarseTopK = v
+    }
+    if let v = env["VSM_SPARSE_AMORT"].flatMap(Int.init) {
+        raCfg.selectorAmortization = v
+    }
+    // F-83 task #126 — `VSM_SPARSE_IMPLICIT=1` flips the wrapper-cache
+    // mode into the F-76 implicit-positions sparse SDPA kernel (the
+    // F-83 north-star path that produced 33.7 ms/step at 128K in the
+    // microbench). Only meaningful when `VSM_SPARSE_WRAPPER=1` since
+    // the sidecar engine has no implicitSparseSDPA implementation.
+    if env["VSM_SPARSE_IMPLICIT"] == "1" {
+        raCfg.useImplicitSparseSDPA = true
+    }
+    // F-83 task #126 — `VSM_SPARSE_WRAPPER=1` swaps the sidecar
+    // path (`StandardKVCache` + `RetrievalAttentionContext`) for the
+    // wrapper path (`RetrievalAttentionKVCache`). The wrapper path goes
+    // through `AttentionUtils.attentionWithCacheUpdate` which has the
+    // full set of sparse decode paths wired (F-69/F-70/F-73/F-74/F-75/
+    // F-76/F-77) — the sidecar engine only has F-73 mask + F-70 gather.
+    // This is the only way to engage `useImplicitSparseSDPA` from the
+    // Bridge today.
+    let useWrapperCache = env["VSM_SPARSE_WRAPPER"] == "1"
+    print("[vsm] sparse cfg: fineBS=\(raCfg.fineBlockSize) "
+          + "fineTopK=\(raCfg.fineTopK) adaptive=\(raCfg.adaptiveTopK) "
+          + "coarseTopK=\(raCfg.coarseTopK) "
+          + "amort=\(raCfg.selectorAmortization) "
+          + "perKVHead=\(raCfg.usePerKVHeadGather) "
+          + "fusedMask=\(raCfg.useFusedMaskBuild) "
+          + "implicit=\(raCfg.useImplicitSparseSDPA) "
+          + "wrapper=\(useWrapperCache) "
+          + "cacheStep=\(cacheStep)")
+    // Sidecar-path contexts (used when `useWrapperCache=false`). When
+    // `useWrapperCache=true` the raContexts list is nil — the wrapper
+    // cache carries its own selector index.
+    let raContexts: [RetrievalAttentionContext?]? = useWrapperCache ? nil : (0..<nLayers).map { i in
         RetrievalAttentionContext(
             layerIdx: i, totalLayers: nLayers,
             raConfig: raCfg, ropeBase: engine.ropeBase
         )
     }
+    // Replace the bare-StandardKVCache list with wrapper caches when
+    // `useWrapperCache=true`. The wrapper init sizes its inner cache via
+    // `step` — pass the same `cacheStep` we computed above so the inner
+    // StandardKVCache doesn't trip the per-decode realloc path either.
+    let cacheFinal: [KVCache] = useWrapperCache
+        ? (0..<nLayers).map { i in
+            RetrievalAttentionKVCache(
+                layerIdx: i, totalLayers: nLayers,
+                raConfig: raCfg, ropeBase: engine.ropeBase,
+                step: cacheStep
+            ) as KVCache
+        }
+        : cache
 
     // Chunked prefill. Use the model's `defaultPrefillStepSize` (1024 for
     // Qwen2 by default — see LanguageModel extension). Each chunk goes
@@ -580,20 +659,25 @@ private func sparsePrefillFirstToken(
         let isLast = chunkEnd == n
 
         let out = qwen2Model.callAsFunction(
-            chunkArray, cache: cache, raContexts: raContexts
+            chunkArray, cache: cacheFinal, raContexts: raContexts
         )
         if isLast {
             eval(out)
             lastLogits = out[0, -1, 0...]
         } else {
             // Materialise the cache writes for this chunk before queuing
-            // the next forward — mirrors the F-83 256K bench's
-            // `asyncEval(cache state)` pattern but uses sync `eval` here
-            // for the bench-sized prompts (≤128K) where the simpler path
-            // is safer to ship.
+            // the next forward. Matches the F-83 256K bench's default
+            // recipe (`F83_SYNC` unset → asyncEval) — lets the host
+            // queue the next chunk's forward graph while the GPU is
+            // still draining this chunk's writes. The sync-eval version
+            // (set `VSM_SPARSE_SYNC_PREFILL=1`) is the diagnostic fallback.
             var arrays: [MLXArray] = []
-            for c in cache { arrays.append(contentsOf: c.innerState()) }
-            eval(arrays)
+            for c in cacheFinal { arrays.append(contentsOf: c.innerState()) }
+            if env["VSM_SPARSE_SYNC_PREFILL"] == "1" {
+                eval(arrays)
+            } else {
+                asyncEval(arrays)
+            }
         }
     }
 
@@ -616,7 +700,8 @@ private func sparsePrefillFirstToken(
     }()
 
     engine.sparseSessions[rid] = SparseSession(
-        cache: cache, raContexts: raContexts,
+        cache: cacheFinal,
+        raContexts: raContexts ?? [],
         nextToken: token, temperature: temperature, topP: topP
     )
     return token
@@ -732,9 +817,17 @@ private func sparseDecodeStep(
 ) -> Int32 {
     let prev = session.nextToken
     let input = MLXArray([prev]).reshaped(1, 1)
+    let traceStep = ProcessInfo.processInfo.environment["VSM_SPARSE_TRACE"] == "1"
+    let stepStart = traceStep ? CFAbsoluteTimeGetCurrent() : 0
+    // Wrapper-cache mode stores `raContexts = []` — pass nil to the
+    // model so dispatch goes through `attentionWithCacheUpdate`'s
+    // `.retrievalSparse` arm (which has the F-76 implicit-sparse path
+    // wired). Sidecar mode passes the per-layer context list.
+    let raCtx: [RetrievalAttentionContext?]? =
+        session.raContexts.isEmpty ? nil : session.raContexts
     let token: Int32 = MLX.Stream.withStream(stream) {
         let out = qwen2Model.callAsFunction(
-            input, cache: session.cache, raContexts: session.raContexts
+            input, cache: session.cache, raContexts: raCtx
         )
         let lastLogits = out[0, -1, 0...]
         let t: MLXArray
@@ -746,6 +839,10 @@ private func sparseDecodeStep(
         }
         eval(t)
         return t.item(Int32.self)
+    }
+    if traceStep {
+        let ms = (CFAbsoluteTimeGetCurrent() - stepStart) * 1000
+        print(String(format: "[vsm] sparse step ms=%.1f", ms))
     }
     session.nextToken = token
     return prev
