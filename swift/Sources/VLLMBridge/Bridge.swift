@@ -601,6 +601,33 @@ private func sparsePrefillFirstToken(
     if env["VSM_SPARSE_IMPLICIT"] == "1" {
         raCfg.useImplicitSparseSDPA = true
     }
+    // F-83 task #127 — `VSM_SPARSE_PREFILL=1` flips the wrapper-cache
+    // into sparse-prefill mode (chunked attention with prior-chunks
+    // gather + within-chunk dense). F83_PERF_256K_RESULTS measured
+    // 2.43x prefill speedup at 128K via direct test; this exposes it
+    // through the Bridge. Only meaningful when `VSM_SPARSE_WRAPPER=1`
+    // since the sidecar path doesn't wire the prefill-sparse branch.
+    //
+    // Optional sub-knobs:
+    //   VSM_SPARSE_PREFILL_FINE_TOPK=N      (default 16 from RA config)
+    //   VSM_SPARSE_PREFILL_COARSE_TOPK=N    (default 2)
+    //   VSM_SPARSE_PREFILL_MIN_CTX=N        (default 16384 — below this prefill goes dense)
+    //   VSM_SPARSE_PREFILL_GROUP_SIZE=N     (default 4 — IndexCache reuse across layers)
+    if env["VSM_SPARSE_PREFILL"] == "1" {
+        raCfg.sparsePrefillEnabled = true
+    }
+    if let v = env["VSM_SPARSE_PREFILL_FINE_TOPK"].flatMap(Int.init) {
+        raCfg.sparsePrefillFineTopK = v
+    }
+    if let v = env["VSM_SPARSE_PREFILL_COARSE_TOPK"].flatMap(Int.init) {
+        raCfg.sparsePrefillCoarseTopK = v
+    }
+    if let v = env["VSM_SPARSE_PREFILL_MIN_CTX"].flatMap(Int.init) {
+        raCfg.sparsePrefillMinContext = v
+    }
+    if let v = env["VSM_SPARSE_PREFILL_GROUP_SIZE"].flatMap(Int.init) {
+        raCfg.sparsePrefillSelectorGroupSize = v
+    }
     // F-83 task #126 — `VSM_SPARSE_WRAPPER=1` swaps the sidecar
     // path (`StandardKVCache` + `RetrievalAttentionContext`) for the
     // wrapper path (`RetrievalAttentionKVCache`). The wrapper path goes
@@ -618,6 +645,10 @@ private func sparsePrefillFirstToken(
           + "fusedMask=\(raCfg.useFusedMaskBuild) "
           + "implicit=\(raCfg.useImplicitSparseSDPA) "
           + "wrapper=\(useWrapperCache) "
+          + "prefillSparse=\(raCfg.sparsePrefillEnabled) "
+          + "prefillFineTopK=\(raCfg.sparsePrefillFineTopK) "
+          + "prefillMinCtx=\(raCfg.sparsePrefillMinContext) "
+          + "prefillGroupSize=\(raCfg.sparsePrefillSelectorGroupSize) "
           + "cacheStep=\(cacheStep)")
     // Sidecar-path contexts (used when `useWrapperCache=false`). When
     // `useWrapperCache=true` the raContexts list is nil — the wrapper
@@ -632,15 +663,36 @@ private func sparsePrefillFirstToken(
     // `useWrapperCache=true`. The wrapper init sizes its inner cache via
     // `step` — pass the same `cacheStep` we computed above so the inner
     // StandardKVCache doesn't trip the per-decode realloc path either.
+    //
+    // F-83 task #127 — TurboQuant+RA composition. When the engine was
+    // created with kvScheme="turbo<N>" (compressionAlgorithm.turbo), use
+    // the wrapper's `valueBits:` init so V is compressed to N bits while
+    // K stays raw FP16 (required by RA's JL selector). Memory savings:
+    // V drops 4× at 4-bit, total KV drops ~2× per slot. Opens B>1 budget
+    // headroom at long context. K must stay raw — rawKeyMode is forced.
+    let tqValueBits: Int = {
+        if case let .turbo(_, vBits, _, _) = engine.generateParams.compressionAlgorithm {
+            return vBits
+        }
+        return 0
+    }()
     let cacheFinal: [KVCache] = useWrapperCache
         ? (0..<nLayers).map { i in
-            RetrievalAttentionKVCache(
-                layerIdx: i, totalLayers: nLayers,
-                raConfig: raCfg, ropeBase: engine.ropeBase,
-                step: cacheStep
+            (tqValueBits > 0
+                ? RetrievalAttentionKVCache(
+                    layerIdx: i, totalLayers: nLayers,
+                    raConfig: raCfg, ropeBase: engine.ropeBase,
+                    valueBits: tqValueBits, tqStep: cacheStep)
+                : RetrievalAttentionKVCache(
+                    layerIdx: i, totalLayers: nLayers,
+                    raConfig: raCfg, ropeBase: engine.ropeBase,
+                    step: cacheStep)
             ) as KVCache
         }
         : cache
+    if useWrapperCache && tqValueBits > 0 {
+        print("[vsm] sparse+turbo composed: valueBits=\(tqValueBits) (K=fp16 raw)")
+    }
 
     // Chunked prefill. Use the model's `defaultPrefillStepSize` (1024 for
     // Qwen2 by default — see LanguageModel extension). Each chunk goes

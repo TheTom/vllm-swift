@@ -20,6 +20,7 @@ from pathlib import Path
 MODEL_PATH = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else os.path.expanduser("~/models/Qwen3-4B-4bit")
 MAX_TOKENS = 50
 PROMPT_TOKENS = 0  # 0 = use default short prompt; >0 = pad to N tokens
+KV_SCHEME = ""  # "" = fp16 raw, "turbo4" / "turbo8" / etc — enables compression
 PREFILL_MODE = "sequential"  # or "batched"
 PROMPTS_MODE = "identical"  # or "unique" — identical measures prefix-cache-hit
                             # speed for caching engines (chat/completion-style),
@@ -37,6 +38,8 @@ for i, arg in enumerate(sys.argv):
     if arg == "--prompts" and i + 1 < len(sys.argv):
         PROMPTS_MODE = sys.argv[i + 1]
         assert PROMPTS_MODE in ("identical", "unique"), PROMPTS_MODE
+    if arg == "--kv-scheme" and i + 1 < len(sys.argv):
+        KV_SCHEME = sys.argv[i + 1]
 
 # BENCH_B env var overrides the default sweep with a single B (used by
 # task #126 sparse-decode characterization where B>1 would OOM at 128K).
@@ -109,7 +112,10 @@ print()
 
 print("Loading model...")
 t0 = time.perf_counter()
-engine = lib.vsm_engine_create(MODEL_PATH.encode(), b"float16", 0, None, 0, 0.9)
+kv_scheme_arg = KV_SCHEME.encode() if KV_SCHEME else None
+engine = lib.vsm_engine_create(MODEL_PATH.encode(), b"float16", 0, kv_scheme_arg, 0, 0.9)
+if KV_SCHEME:
+    print(f"KV scheme: {KV_SCHEME}")
 load_time = time.perf_counter() - t0
 print(f"Loaded in {load_time:.1f}s")
 
