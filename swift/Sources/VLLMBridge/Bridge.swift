@@ -1323,6 +1323,11 @@ public func vsm_engine_decode_all(
            !engine.batchSlots.isEmpty
         {
             let B = engine.batchSlots.count
+            // TEMP DIAG B=1 long-ctx regression investigation.
+            if ProcessInfo.processInfo.environment["VSM_DIAG"] == "1" {
+                FileHandle.standardError.write(Data(
+                    "[DIAG] qwen2 fullyBatched path entered: B=\(B) active=\(bCaches[0].active) offset0=\(bCaches[0].offsets[0]) maxBatch=\(bCaches[0].maxBatch) maxSeq=\(bCaches[0].keys.dim(2))\n".utf8))
+            }
             let sortedSlots = engine.batchSlots.sorted { $0.value < $1.value }
             let allGreedy = sortedSlots.allSatisfy { (rid, _) in
                 (engine.sessions[rid]?.temperature ?? 0) == 0
@@ -1855,7 +1860,6 @@ public func vsm_engine_init_batched(_ handle: UnsafeMutableRawPointer?) -> Int32
         let maxSeq = engine.maxKVSize > 0
             ? engine.maxKVSize
             : max(2048, maxPrefillOffset + decodeMargin)
-        let maxBatch = max(B, engine.maxConcurrentRequests)
 
         // Resolve a sample peek for dtype (try any layer that has populated K/V).
         var sampleDtype: DType = .bfloat16
@@ -1879,6 +1883,33 @@ public func vsm_engine_init_batched(_ handle: UnsafeMutableRawPointer?) -> Int32
             let kvHeads = firstKeys.dim(1)
             let headDim = firstKeys.dim(3)
             perLayerDims = Array(repeating: (kvHeads, headDim), count: numLayers)
+        }
+
+        // maxBatch budget. Naive `max(B, engine.maxConcurrentRequests)` (=64
+        // default) fits at short prompts (chat-style batched serving, ~7GB
+        // cache total at 14B + 18-token prompt + B=64) but catastrophic at
+        // long-ctx single-user (~211GB at 14B + 16K + maxBatch=64 → swap
+        // thrash → ~10 s/step at B=1 16K, hidden until B=1 long-ctx cell was
+        // benched 2026-05-16). Cap by an estimated cache memory budget so
+        // single-user long-ctx serves at the actual B, not at 64 empty
+        // pre-allocated slots that won't be filled.
+        //
+        // Estimate per-slot cache mem ≈ maxSeq * numLayers * avg_kvHeads *
+        //   avg_headDim * 2 (K+V) * dtypeBytes.
+        let avgKvHeads = perLayerDims.map { $0.kvHeads }.reduce(0, +) / max(numLayers, 1)
+        let avgHeadDim = perLayerDims.map { $0.headDim }.reduce(0, +) / max(numLayers, 1)
+        let dtypeBytes = (sampleDtype == .float32) ? 4 : 2
+        let cacheMemBudgetGB = Int(ProcessInfo.processInfo.environment["VSM_MAX_CACHE_GB"] ?? "32") ?? 32
+        let cacheMemBudgetBytes = cacheMemBudgetGB * 1024 * 1024 * 1024
+        let perSlotBytes = maxSeq * numLayers * max(avgKvHeads, 1) * max(avgHeadDim, 1)
+            * 2 * dtypeBytes
+        let budgetBatch = perSlotBytes > 0 ? max(1, cacheMemBudgetBytes / perSlotBytes) : Int.max
+        let maxBatch = Int(ProcessInfo.processInfo.environment["VSM_DIAG_MAXBATCH_EQ_B"] ?? "0") == 1
+            ? B
+            : max(B, min(engine.maxConcurrentRequests, budgetBatch))
+        if maxBatch < engine.maxConcurrentRequests {
+            print("[vsm] init_batched: capped maxBatch \(engine.maxConcurrentRequests)→\(maxBatch) "
+                + "(perSlot=\(perSlotBytes / 1024 / 1024)MB × budget=\(cacheMemBudgetGB)GB)")
         }
 
         // Allocate batched caches. For KV-shared layers (previousKVs[i]!=i),
