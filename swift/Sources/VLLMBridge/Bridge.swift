@@ -21,6 +21,29 @@ struct UnsafeSendable<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
+// MARK: - Memory instrumentation (issue #111 follow-up — long-ctx leak hunt)
+
+/// Format bytes as a human-readable MB/GB string.
+private func memFmt(_ bytes: Int) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        return String(format: "%.2fGB", Double(bytes) / 1_073_741_824)
+    }
+    return String(format: "%.1fMB", Double(bytes) / 1_048_576)
+}
+
+/// Print one-line MLX memory snapshot at the given checkpoint.
+/// Cheap: just reads counters, no GPU sync.
+private func memLog(_ tag: String) {
+    let active = Memory.activeMemory
+    let cache = Memory.cacheMemory
+    let peak = Memory.peakMemory
+    print("[mem] \(tag): active=\(memFmt(active)) cache=\(memFmt(cache)) peak=\(memFmt(peak))")
+}
+
+/// Decode-step counter for periodic memory logging (every N steps).
+private nonisolated(unsafe) var decodeStepCounter: Int = 0
+private let memLogInterval = 50
+
 // MARK: - Stub tokenizer (Python handles tokenization)
 
 /// Minimal tokenizer that satisfies the protocol. All actual tokenization
@@ -430,17 +453,21 @@ public func vsm_engine_create(
     engineQueue.sync { engines[handle] = engine }
 
     print("[vsm] Engine created: \(modelId)")
+    memLog("engine_create:done")
     return handle
 }
 
 @_cdecl("vsm_engine_destroy")
 public func vsm_engine_destroy(_ handle: UnsafeMutableRawPointer?) {
     guard let handle else { return }
+    memLog("engine_destroy:before")
     engineQueue.sync {
         if engines.removeValue(forKey: handle) != nil {
             Unmanaged<InferenceEngine>.fromOpaque(handle).release()
         }
     }
+    Memory.clearCache()
+    memLog("engine_destroy:after_clearCache")
 }
 
 @_cdecl("vsm_engine_vocab_size")
@@ -1425,6 +1452,10 @@ public func vsm_engine_decode_all(
     maxReqs: Int32
 ) -> Int32 {
     guard let handle, let reqIds, let outTokens else { return 0 }
+    decodeStepCounter += 1
+    if decodeStepCounter % memLogInterval == 0 {
+        memLog("decode_all:step\(decodeStepCounter)")
+    }
 
     return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
@@ -3101,12 +3132,30 @@ private func prefillBatchedUniformHybrid(
     let caches = lmModel.newCache(parameters: nil)
     let numLayers = caches.count
 
-    // Same chunked pattern as the Qwen3 path so batchTokens matches what
-    // sequential prefill_req would have stashed (second sampled token).
-    if T > 1 {
-        let prefillChunk = inputBatch[0..., ..<(T - 1)]
-        _ = lmModel(LMInput.Text(tokens: prefillChunk), cache: caches, state: nil)
+    // Chunked prefill — mirrors `TokenIterator.prefill` (mlx-swift-lm
+    // LLMModel.swift L41-58). The previous single-call `lmModel(prefillChunk)`
+    // built ALL T-1 tokens' activations as one MLX graph, ballooning the
+    // buffer pool to 30+ GB at ctx=32K. Chunking at `defaultPrefillStepSize`
+    // (4096 for MoE, 1024 dense) + asyncEval per chunk + final clearCache
+    // bounds peak transient memory to one chunk's worth of activations.
+    // (issue #111 follow-up)
+    let prefillStepSize = lmModel.defaultPrefillStepSize
+    let prefillEnd = T - 1
+    var pos = 0
+    while pos < prefillEnd {
+        let chunkEnd = min(pos + prefillStepSize, prefillEnd)
+        let chunk = inputBatch[0..., pos..<chunkEnd]
+        _ = lmModel(LMInput.Text(tokens: chunk), cache: caches, state: nil)
+        // async barrier — CPU keeps building next chunk's graph while GPU
+        // evaluates this one.
+        var cacheArrays: [MLXArray] = []
+        for c in caches { cacheArrays.append(contentsOf: c.innerState()) }
+        asyncEval(cacheArrays)
+        pos = chunkEnd
     }
+    eval(caches)
+    MLX.Memory.clearCache()
+
     let lastPromptTokens = inputBatch[0..., (T - 1)..<T]  // [B, 1]
     let firstStepOut = lmModel(
         LMInput.Text(tokens: lastPromptTokens), cache: caches, state: nil)
@@ -3120,18 +3169,41 @@ private func prefillBatchedUniformHybrid(
     let firstTokens = argMax(secondLogits, axis: -1)        // [B]
     eval(firstTokens)
 
-    // Build a fresh BatchedHybridCache sized to the scheduler's
-    // max_num_seqs (was hardcoded 64 — over-alloc on small concurrency).
-    let maxBatch = max(B, engine.maxConcurrentRequests)
+    // Size the attention-layer BatchedKVCache to fit the actual prefill
+    // length. Without this, `model.newBatchedHybridCache` falls back to its
+    // 2048 default for `maxSeq`, and the `copyBatchedAttentionLayer` call
+    // below tries to write `dst.keys[..<B, 0..., ..<offset, 0...] = k` with
+    // offset > 2048, crashing on broadcast `(1, n_kv, offset, head_dim)`
+    // vs `(1, n_kv, 2048, head_dim)`. Cache holds T prefill tokens + 2 sampled
+    // (firstSampled + first decode step). (issue #111)
+    var hybridParams = engine.generateParams
+    if hybridParams.maxKVSize == nil {
+        let decodeMargin = 512
+        hybridParams.maxKVSize = max(2048, T + 2 + decodeMargin)
+    }
+    let maxSeq = hybridParams.maxKVSize!
+
+    // maxBatch = B (the actual prefill batch). The previous default
+    // `max(B, engine.maxConcurrentRequests=64)` over-allocated 64 slots
+    // even at B=1, ballooning to 40+ GB at ctx=32K (10 attn layers ×
+    // 2 kv_heads × 256 head_dim × 2 bytes K+V × 32768 ctx × 64 slots).
+    // The prefill_batched_uniform path knows the exact batch up front;
+    // there's no benefit to reserving idle slots. New concurrent
+    // requests trigger a fresh init.
+    let maxBatch = B
+
     // Honor `--additional-config kv_scheme=turbo*` on the batched-decode
     // path. Pre v0.5.3 this flag was silently dropped here — newBatched-
     // HybridCache only knew how to construct raw-fp16 BatchedKVCache, so
     // the kvScheme set in GenerateParameters never reached the attention
-    // layers' batched cache. Buddy's v0.5.1 alpha report (Qwen3.6 +
-    // turbo4v2 → ".2.2.2.2..." drift) was a symptom of that silent bypass.
+    // layers' batched cache.
     let (turboKB, turboVB) = batchedTurboBits(from: engine.generateParams)
+
+    print("[vsm] prefill_batched_uniform hybrid: T=\(T) B=\(B) maxBatch=\(maxBatch) "
+        + "maxSeq=\(maxSeq)")
+    memLog("prefill_batched_uniform_hybrid:before_alloc")
     let hCaches = model.newBatchedHybridCache(
-        maxBatch: maxBatch, parameters: engine.generateParams,
+        maxBatch: maxBatch, parameters: hybridParams,
         turboKeyBits: turboKB, turboValueBits: turboVB)
 
     guard numLayers == hCaches.layers.count else {
@@ -3187,6 +3259,8 @@ private func prefillBatchedUniformHybrid(
         }
     }
     eval(toEval)
+
+    memLog("prefill_batched_uniform_hybrid:after_eval")
 
     // Engine state mirrors init_batched hybrid path: batchedHybridCaches
     // holds the polymorphic cache, batchedCaches stays nil.
@@ -3309,6 +3383,27 @@ private func initBatchedHybrid(
     // Mirror the prefill_batched_uniform path: thread kvScheme into the
     // batched-hybrid cache factory so turbo* schemes actually take effect.
     let (turboKB, turboVB) = batchedTurboBits(from: engine.generateParams)
+
+    // Size the attention-layer BatchedKVCache to fit the actual prefill
+    // length. The non-hybrid path (vsm_engine_init_batched, line ~2313) does
+    // this; the hybrid path was passing `engine.generateParams` straight
+    // through, which defaults `maxKVSize=nil` → `BatchedKVCache` falls back
+    // to its 2048 default in `Qwen35TextModel.newBatchedHybridCache`. When
+    // prefill > 2048 the StandardKVCache→BatchedKVCache copy in
+    // `copyAttentionLayerIntoSlot` (line ~3216) tries
+    // `dst.keys[slot, 0..., ..<offset, 0...] = k[0]` with offset > 2048 and
+    // crashes on broadcast `(1, n_kv, offset, head_dim)` vs
+    // `(1, n_kv, 2048, head_dim)`. Mirror the non-hybrid sizing logic here.
+    // (issue #111)
+    let maxPrefillOffset = rids.compactMap {
+        engine.sessions[$0]?.iterator.cache.first?.offset
+    }.max() ?? 0
+    let decodeMargin = 512
+    var hybridParams = engine.generateParams
+    if hybridParams.maxKVSize == nil {
+        hybridParams.maxKVSize = max(2048, maxPrefillOffset + decodeMargin)
+    }
+
     let hCaches: BatchedHybridCache
     // If sparse requested AND model is BatchedHybridSparseLLM, build
     // hybrid cache with `.sparseAttention(BatchedRetrievalAttentionKVCache)` for
@@ -3319,11 +3414,11 @@ private func initBatchedHybrid(
     {
         let raCfg = RetrievalAttentionConfig()
         hCaches = sparseModel.newBatchedHybridSparseCache(
-            maxBatch: maxBatch, parameters: engine.generateParams,
+            maxBatch: maxBatch, parameters: hybridParams,
             raConfig: raCfg)
     } else {
         hCaches = model.newBatchedHybridCache(
-            maxBatch: maxBatch, parameters: engine.generateParams,
+            maxBatch: maxBatch, parameters: hybridParams,
             turboKeyBits: turboKB, turboValueBits: turboVB)
     }
 
@@ -3415,7 +3510,9 @@ private func initBatchedHybrid(
     // pendingSampledB==1 behind.
     engine.pendingSampledTokens = nil
     engine.pendingSampledB = 0
-    print("[vsm] Batched hybrid cache initialized: B=\(B), layers=\(numLayers), maxBatch=\(maxBatch)")
+    print("[vsm] Batched hybrid cache initialized: B=\(B), layers=\(numLayers), "
+        + "maxBatch=\(maxBatch), maxSeq=\(hybridParams.maxKVSize ?? 0) "
+        + "(prefill=\(maxPrefillOffset))")
     return Int32(B)
 }
 
