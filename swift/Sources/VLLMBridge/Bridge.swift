@@ -5,10 +5,12 @@
 // All GPU compute stays here in Swift/Metal — Python only drives scheduling.
 
 import CoreImage
+import Cmlx
 import Foundation
 import MLX
 import MLXNN
 import MLXLMCommon
+import MetalTileSwift
 @_exported import MLXLLM
 import MLXVLM
 // HuggingFace macros require the full HF SDK. For now, load models
@@ -176,6 +178,9 @@ final class InferenceEngine {
     /// drives prefill+decode through the single-stream sparse path. Set
     /// from `VSM_SPARSE=1` at engine create. Only honored for Qwen2Model.
     var sparseEnabled: Bool = false
+    /// One-shot log gate so `[vsm] decode dispatch: BatchedHybridSparseLLM`
+    /// only fires once per engine lifetime instead of per decode call.
+    var sparseHybridDecodeLogged: Bool = false
     /// RoPE base parsed from the model's config.json at engine-create
     /// time. Used to construct each request's `RetrievalAttentionContext`
     /// so the selector index's trig features stay aligned with the
@@ -200,6 +205,17 @@ final class InferenceEngine {
     /// used when model conforms to `BatchedHybridLLM` (e.g. Qwen3Next).
     /// Mutually exclusive with `batchedCaches` for a given engine instance.
     var batchedHybridCaches: BatchedHybridCache?
+    /// B=1 BHC-bypass — when `prefillBatchedUniformHybrid` lands at B=1 and
+    /// `VSM_HYBRID_B1_BYPASS != "0"`, the prefilled `[StandardKVCache,
+    /// SSMStateCache, …]` mix is stored here instead of being copied into a
+    /// `BatchedHybridCache`. Decode goes through `lmModel(_:cache:state:)`
+    /// against this cache list — same path `TokenIterator.next()` uses.
+    /// Removes the alloc+copy stage AND the per-step
+    /// `BatchedKVCache.updateRaw` overhead. Keyed by request id; only ever
+    /// holds one entry at B=1. Migrates into a fresh `BatchedHybridCache` on
+    /// the second `add_batch_slot`. Path A from
+    /// `/tmp/iter1-bhc-bypass-research.md`.
+    var hybridDecodeCaches: [String: [KVCache]] = [:]
     /// Maps request ID → batch slot index in batchedCaches / batchedHybridCaches.
     var batchSlots: [String: Int] = [:] {
         didSet { _sortedSlotsCache = nil }
@@ -435,14 +451,18 @@ public func vsm_engine_create(
             }
         }
         let sparseCompatible = engine.model is BatchedSparseLLM
+        let sparseHybridCompatible = (engine.model as? any BatchedHybridSparseLLM) != nil
         print("[vsm] sparse decode ENABLED (VSM_SPARSE=\(envSparse) "
               + "VSM_SPARSE_BATCHED=\(envSparseBatched) "
               + "kvScheme=\(schemeSparse ? "sparse" : "other") "
-              + "model=\(type(of: engine.model)) sparseCompatible=\(sparseCompatible) "
+              + "model=\(type(of: engine.model)) "
+              + "sparseCompatible=\(sparseCompatible) "
+              + "sparseHybridCompatible=\(sparseHybridCompatible) "
               + "ropeBase=\(engine.ropeBase))")
-        if !sparseCompatible {
-            print("[vsm] WARNING: sparse decode requested but model is not "
-                  + "a BatchedSparseLLM (Qwen2/Qwen3/Qwen3MoE/Llama/Gemma3/Gemma4/Mistral3/Phi3) — "
+        if !sparseCompatible && !sparseHybridCompatible {
+            print("[vsm] WARNING: sparse decode requested but model is neither "
+                  + "BatchedSparseLLM (Qwen2/Qwen3/Qwen3MoE/Llama/Gemma3/Gemma4/Mistral3/Phi3) "
+                  + "nor BatchedHybridSparseLLM (Qwen35/Qwen35MoE/NemotronH) — "
                   + "will fall through to dense path.")
         }
     }
@@ -451,6 +471,56 @@ public func vsm_engine_create(
     let ptr = Unmanaged.passRetained(engine).toOpaque()
     let handle = UnsafeMutableRawPointer(ptr)
     engineQueue.sync { engines[handle] = engine }
+
+    // Pin process wired-memory limit to the GPU's max recommended working
+    // set. mlx-lm Python does this via `mx.set_wired_limit(max_rec_size)`
+    // (generate.py:259) for all generation paths. Without it, MLX
+    // allocations may page through Mach VM under pressure, slowing prefill
+    // by ~1.5-2× at long context (T=32K Qwen3.6-A3B confirmed; sysctl
+    // iogpu.wired_limit_mb=0 default = no wiring). Mirror mlx-lm's call
+    // exactly. Process-wide setting, set once at engine creation.
+    if let maxRec = MLX.GPU.maxRecommendedWorkingSetBytes() {
+        // Call the C symbol directly. mlx-swift's WiredMemoryBackend is
+        // private; the public WiredMemoryManager is an async ticket API
+        // overkill for set-once-at-startup. The "cache desync" warning in
+        // WiredMemory.swift docs applies only to mixed cached+raw use; we
+        // only set once and never change.
+        var previous: size_t = 0
+        _ = mlx_set_wired_limit(&previous, size_t(maxRec))
+        print("[vsm] wired_limit: prev=\(previous/1024/1024)MB now=\(maxRec/1024/1024)MB")
+    }
+
+    // Connectivity proof: load MetalTileSwift's pre-compiled kernels.metallib
+    // and report the kernel names available. Confirms vllm-swift can reach
+    // metaltile kernels through the Swift package.
+    let mtLib = MetalTileLibrary.shared
+    let funcNames = mtLib.library.functionNames
+    let mtKey = "VSM_USE_METALTILE"
+    let mtEnabled = (ProcessInfo.processInfo.environment[mtKey] ?? "0") != "0"
+    print("[vsm] MetalTileSwift loaded: \(funcNames.count) kernels, mtl=\(mtLib.metallibURL.lastPathComponent), VSM_USE_METALTILE=\(mtEnabled)")
+    if let qmmIdx = funcNames.firstIndex(where: { $0.contains("mt_qmm_mma") }) {
+        print("[vsm] metaltile mt_qmm_mma: \(funcNames[qmmIdx])")
+    }
+    if let moeIdx = funcNames.firstIndex(where: { $0.contains("mt_moe_gather_qmm") }) {
+        print("[vsm] metaltile mt_moe_gather: \(funcNames[moeIdx])")
+    }
+
+    // Smoke dispatch: prove mt_qmm_mma can execute end-to-end through
+    // vllm-swift's process context. Uses M=32 N=256 K=2048 shape (Qwen3.6
+    // attention qkv_proj per chunk).
+    do {
+        let xS = MLXArray.zeros([32, 2048], dtype: .float16)
+        let wQ = MLXArray.zeros([256, 256], dtype: .uint32) // [N, K/8]=[256, 256]
+        let sS = MLXArray.zeros([256, 32], dtype: .float16) // [N, K/gs]=[256, 32]
+        let bS = MLXArray.zeros([256, 32], dtype: .float16)
+        let t0 = Date()
+        if let y = MetalTileShim.qmmMma(x: xS, w: wQ, scales: sS, biases: bS) {
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            print("[vsm] metaltile smoke: mt_qmm_mma M=32 N=256 K=2048 fp16 → shape=\(y.shape) took=\(ms)ms")
+        } else {
+            print("[vsm] metaltile smoke FAILED — shim returned nil")
+        }
+    }
 
     print("[vsm] Engine created: \(modelId)")
     memLog("engine_create:done")
@@ -467,6 +537,13 @@ public func vsm_engine_destroy(_ handle: UnsafeMutableRawPointer?) {
         }
     }
     Memory.clearCache()
+    // Reset wired_limit to 0 so a subsequent process (or re-create in same
+    // process) doesn't pile wired pressure on top of itself. Matches mlx-lm's
+    // wired_limit() context manager that restores on exit.
+    var prev: size_t = 0
+    _ = mlx_set_wired_limit(&prev, 0)
+    print("[vsm] wired_limit reset to 0 (was \(prev/1024/1024)MB)")
+    fflush(stdout)
     memLog("engine_destroy:after_clearCache")
 }
 
@@ -963,19 +1040,15 @@ public func vsm_engine_decode_step_req(
 
         guard var session = engine.sessions[rid] else { return Int32(-1) }
 
-        let start = CFAbsoluteTimeGetCurrent()
         guard let token = session.iterator.next() else {
             return Int32(-1)
         }
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
 
         engine.sessions[rid] = session
         engine.totalDecodeTokens += 1
-        engine.totalDecodeTime += elapsed
-        engine.peakMemoryBytes = max(
-            engine.peakMemoryBytes,
-            Int64(Memory.peakMemory)
-        )
+        // Skipped per-step Memory.peakMemory + CFAbsoluteTime tracking (Iter 3 squeeze) —
+        // these added ~50-150us per step on the hot decode path. Caller can poll
+        // peakMemory via a separate API when needed.
 
         return Int32(token)
     }
@@ -1672,6 +1745,96 @@ public func vsm_engine_decode_all(
             return count
         }
 
+        // B=1 BHC bypass decode — Path A. When prefill stashed the
+        // per-layer mix in `hybridDecodeCaches[rid]`, skip the
+        // `BatchedHybridLLM.fullyBatchedDecode` path and call the model's
+        // standard `callAsFunction(_:cache:)` against the prefill caches
+        // directly (same path TokenIterator uses). Saves the alloc+copy
+        // stage AND the per-step `BatchedKVCache.updateRaw` overhead.
+        // Falls back cleanly to the BHC path if the cast fails.
+        if engine.batchedHybridCaches == nil,
+           !engine.hybridDecodeCaches.isEmpty,
+           engine.batchSlots.count == 1,
+           let (rid, slotIdx) = engine.batchSlots.first,
+           slotIdx == 0,
+           let caches = engine.hybridDecodeCaches[rid]
+        {
+            let lmModel: any LanguageModel = engine.model
+            let temp = engine.sessions[rid]?.temperature ?? 0
+            let allGreedy = temp == 0
+
+            // ASYNC-PIPELINED FAST PATH — mirrors the Qwen3/Qwen2/hybrid
+            // paths below. Step N's forward is kicked via asyncEval while
+            // the host pulls step N-1's sampled token from `pending`.
+            if allGreedy,
+               let pending = engine.pendingSampledTokens,
+               engine.pendingSampledB == 1
+            {
+                let newSampled: MLXArray = MLX.Stream.withStream(engine.decodeStream) {
+                    let inputBatch = pending.reshaped(1, 1)
+                    let logits = lmModel(
+                        LMInput.Text(tokens: inputBatch),
+                        cache: caches, state: nil
+                    ).logits
+                    let lastLogits = logits[0, -1, 0...]
+                    let s = argMax(lastLogits, axis: -1).asType(.int32)
+                    asyncEval(s)
+                    return s
+                }
+                let prevTok = Int(pending.item(Int32.self))
+                engine.batchTokens[0] = prevTok
+                reqIds[0] = strdup(rid)
+                outTokens[0] = Int32(prevTok)
+                engine.pendingSampledTokens = newSampled
+                engine.pendingSampledB = 1
+
+                let elapsed = CFAbsoluteTimeGetCurrent() - start
+                engine.totalDecodeTokens += 1
+                engine.totalDecodeTime += elapsed
+                return 1
+            }
+
+            // SYNC PATH — first call (no pending), B-shape change, or
+            // non-greedy sampling.
+            let tokIn = Int32(engine.batchTokens[0])
+            let sampledTok: Int32 = MLX.Stream.withStream(engine.decodeStream) {
+                let inputBatch = MLXArray([tokIn]).reshaped(1, 1)
+                let logits = lmModel(
+                    LMInput.Text(tokens: inputBatch),
+                    cache: caches, state: nil
+                ).logits
+                let lastLogits = logits[0, -1, 0...]
+                let t: MLXArray
+                if temp > 0 {
+                    let scaled = lastLogits / temp
+                    t = MLXRandom.categorical(scaled).asType(.int32)
+                } else {
+                    t = argMax(lastLogits, axis: -1).asType(.int32)
+                }
+                eval(t)
+                return t.item(Int32.self)
+            }
+            // previousY pattern: return the INPUT token, stash the new
+            // sample as next step's input — matches all other batched paths.
+            let returnToken = engine.batchTokens[0]
+            engine.batchTokens[0] = Int(sampledTok)
+            reqIds[0] = strdup(rid)
+            outTokens[0] = Int32(returnToken)
+
+            // Seed pending so the next call can take the async fast path.
+            if allGreedy {
+                engine.pendingSampledTokens = MLXArray([sampledTok])
+                engine.pendingSampledB = 1
+            } else {
+                engine.pendingSampledTokens = nil
+            }
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            engine.totalDecodeTokens += 1
+            engine.totalDecodeTime += elapsed
+            return 1
+        }
+
         // Fully batched path for hybrid models (Qwen3.5/3.6 GDN, Qwen3Next,
         // etc.) with BatchedHybridCache. Mirrors the Qwen3 / Qwen2 fully-
         // batched paths above — async pipelining via pendingSampledTokens
@@ -1701,6 +1864,11 @@ public func vsm_engine_decode_all(
                 else { return nil }
                 return s
             }()
+            if !engine.sparseHybridDecodeLogged, sparseHybrid != nil {
+                print("[vsm] decode dispatch: BatchedHybridSparseLLM "
+                      + "fullyBatchedSparseDecode (B=\(B))")
+                engine.sparseHybridDecodeLogged = true
+            }
 
             // ASYNC-PIPELINED FAST PATH (greedy + stable B + pending from
             // prior step). Same pattern as the Qwen2/Qwen3 paths above.
@@ -2502,6 +2670,107 @@ public func vsm_engine_add_batch_slot(
         guard let engine = engines[handle],
               let session = engine.sessions[rid] else { return Int32(-1) }
 
+        // B=1 BHC-bypass migration — Path A. If a prior rid is bypassed
+        // (`hybridDecodeCaches` populated, `batchedHybridCaches` nil) and
+        // a second rid is being added, materialize a `BatchedHybridCache`
+        // sized for the requested batch, seed slot 0 from the bypassed
+        // caches, drop the bypass entry, then fall through to the normal
+        // hybrid add-slot path which fills slot 1.
+        if engine.batchedHybridCaches == nil,
+           !engine.hybridDecodeCaches.isEmpty,
+           let hybridModel = engine.model as? any BatchedHybridLLM,
+           let (bypassRid, bypassCaches) = engine.hybridDecodeCaches.first,
+           let bypassSlot = engine.batchSlots[bypassRid]
+        {
+            // Size the BatchedHybridCache to fit the bypassed prefill
+            // offset + decode margin (same logic as prefill_batched_uniform
+            // hybrid). Take the max offset across the bypassed caches as
+            // the prefill length (attention layers' StandardKVCache holds
+            // the longest offset; SSMStateCache offsets are step counts).
+            let maxOffset = bypassCaches.map { $0.offset }.max() ?? 0
+            let decodeMargin = 512
+            var hybridParams = engine.generateParams
+            if hybridParams.maxKVSize == nil {
+                hybridParams.maxKVSize = max(2048, maxOffset + decodeMargin)
+            }
+            let maxBatch = max(2, engine.maxConcurrentRequests)
+            let (turboKB, turboVB) = batchedTurboBits(from: engine.generateParams)
+            let newHCaches = hybridModel.newBatchedHybridCache(
+                maxBatch: maxBatch, parameters: hybridParams,
+                turboKeyBits: turboKB, turboValueBits: turboVB)
+
+            // Seed slot 0 from the bypassed caches. Reuse the per-layer
+            // copyAttentionLayerIntoSlot / copyMambaLayerIntoSlot helpers
+            // that the existing addBatchSlotHybrid path uses (single-slot
+            // variants that consume the `[1, …]`-shaped StandardKVCache /
+            // SSMStateCache the bypassed caches hold).
+            let numLayers = bypassCaches.count
+            guard numLayers == newHCaches.layers.count else {
+                print("[vsm] add_batch_slot bypass-migrate: layer count mismatch — bypass=\(numLayers) hybrid=\(newHCaches.layers.count)")
+                return Int32(-1)
+            }
+            for layerIdx in 0..<numLayers {
+                let srcCache = bypassCaches[layerIdx]
+                let dstLayer = newHCaches.layers[layerIdx]
+                switch dstLayer {
+                case .attention(let bkv):
+                    guard let simple = srcCache as? StandardKVCache,
+                          copyAttentionLayerIntoSlot(src: simple, dst: bkv, slot: bypassSlot)
+                    else {
+                        print("[vsm] add_batch_slot bypass-migrate: layer \(layerIdx) expected StandardKVCache")
+                        return Int32(-1)
+                    }
+                case .gdn(let bma):
+                    guard let mamba = srcCache as? SSMStateCache,
+                          copyMambaLayerIntoSlot(src: mamba, dst: bma, slot: bypassSlot)
+                    else {
+                        print("[vsm] add_batch_slot bypass-migrate: layer \(layerIdx) expected SSMStateCache")
+                        return Int32(-1)
+                    }
+                case .sparseAttention(let raCache):
+                    guard let simple = srcCache as? StandardKVCache,
+                          copyAttentionLayerIntoSlot(src: simple, dst: raCache.inner, slot: bypassSlot)
+                    else {
+                        print("[vsm] add_batch_slot bypass-migrate: layer \(layerIdx) expected StandardKVCache (sparse)")
+                        return Int32(-1)
+                    }
+                }
+            }
+            // Materialize slot 0 writes.
+            var toEval = [MLXArray]()
+            for layer in newHCaches.layers {
+                switch layer {
+                case .attention(let c):
+                    toEval.append(c.keys); toEval.append(c.values)
+                case .gdn(let c):
+                    toEval.append(c.convState); toEval.append(c.recState)
+                case .sparseAttention(let c):
+                    toEval.append(c.inner.keys); toEval.append(c.inner.values)
+                }
+            }
+            eval(toEval)
+
+            // Expand batchTokens to maxBatch (was sized to 1 by prefill
+            // bypass) — preserves slot 0's last sampled token.
+            var newBatchTokens = Array(repeating: 0, count: maxBatch)
+            for (slotRid, slotIdx) in engine.batchSlots {
+                if slotIdx < engine.batchTokens.count,
+                   slotIdx < newBatchTokens.count,
+                   slotRid == bypassRid {
+                    newBatchTokens[slotIdx] = engine.batchTokens[slotIdx]
+                }
+            }
+            engine.batchTokens = newBatchTokens
+            engine.batchedHybridCaches = newHCaches
+            engine.hybridDecodeCaches.removeValue(forKey: bypassRid)
+            // pendingSampledTokens was shape [1] from the bypass async
+            // path — drop it so the BHC sync path below kicks a fresh step.
+            engine.pendingSampledTokens = nil
+            engine.pendingSampledB = 0
+            print("[vsm-timing] hybrid_b1_bypass migrate -> BHC maxBatch=\(maxBatch)")
+            // Fall through to BHC add-slot below which fills slot 1.
+        }
+
         // Hybrid path: copy per-layer cache (StandardKVCache OR SSMStateCache) into
         // the matching BatchedHybridCache layer, then addSlot() to advance
         // active counts in lockstep across all layers.
@@ -2559,6 +2828,20 @@ public func vsm_engine_remove_batch_slot(
     return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle],
               let slotIdx = engine.batchSlots[rid] else { return Int32(-1) }
+
+        // B=1 BHC bypass cleanup. When the removed rid is the only one in
+        // the bypassed-decode path, drop the cache entry, clear slot
+        // bookkeeping + pending tensor, and return. No BHC was ever
+        // allocated, so the normal swap-from-end logic doesn't apply.
+        if engine.batchedHybridCaches == nil,
+           engine.hybridDecodeCaches[rid] != nil
+        {
+            engine.hybridDecodeCaches.removeValue(forKey: rid)
+            engine.batchSlots.removeValue(forKey: rid)
+            engine.pendingSampledTokens = nil
+            engine.pendingSampledB = 0
+            return Int32(0)
+        }
 
         // Hybrid path: delegate the swap-from-end to BatchedHybridCache.
         if let hCaches = engine.batchedHybridCaches {
@@ -2718,6 +3001,20 @@ public func vsm_engine_finish_req(
         guard let engine = engines[handle] else { return }
         engine.sessions.removeValue(forKey: rid)
         engine.sparseSessions.removeValue(forKey: rid)
+        // B=1 BHC bypass cleanup. When this rid was on the bypassed-decode
+        // path (no BHC ever allocated for it), drop the cache + slot +
+        // pending tensor here. The BHC path (when present) is owned by
+        // remove_batch_slot via vllm's scheduler hooks and stays untouched.
+        if engine.hybridDecodeCaches[rid] != nil {
+            engine.hybridDecodeCaches.removeValue(forKey: rid)
+            engine.batchSlots.removeValue(forKey: rid)
+            if engine.batchedHybridCaches == nil
+                && engine.hybridDecodeCaches.isEmpty
+            {
+                engine.pendingSampledTokens = nil
+                engine.pendingSampledB = 0
+            }
+        }
     }
 }
 
@@ -2785,6 +3082,7 @@ public func vsm_engine_reset(_ handle: UnsafeMutableRawPointer?) {
         guard let engine = engines[handle] else { return }
         engine.sessions.removeAll()
         engine.sparseSessions.removeAll()
+        engine.hybridDecodeCaches.removeAll()
     }
 }
 
@@ -3139,35 +3437,103 @@ private func prefillBatchedUniformHybrid(
     // (4096 for MoE, 1024 dense) + asyncEval per chunk + final clearCache
     // bounds peak transient memory to one chunk's worth of activations.
     // (issue #111 follow-up)
+    // mlx-lm Python's pattern (generate.py:432-453):
+    //   per chunk: sync eval(cache.state) + clear_cache()
+    //   last chunk: sample inline (no trailing forward)
+    //
+    // Tested asyncEval+single-trailing-eval (mlx-swift-lm LLMModel.swift's
+    // canonical pattern) — REGRESSED 2.8× on Qwen3.6-35B-A3B T=32K B=1
+    // (24559→68689ms). Without per-chunk clearCache, the MLX buffer pool
+    // grows until back-pressure (MAX_ACTIVE_TASKS=10) kicks in, then
+    // serializes worse than the explicit sync. The mlx-lm Python pattern
+    // is correct for this kernel + chunk size + model.
     let prefillStepSize = lmModel.defaultPrefillStepSize
-    let prefillEnd = T - 1
+    let prefillEnd = T
     var pos = 0
-    while pos < prefillEnd {
-        let chunkEnd = min(pos + prefillStepSize, prefillEnd)
-        let chunk = inputBatch[0..., pos..<chunkEnd]
-        _ = lmModel(LMInput.Text(tokens: chunk), cache: caches, state: nil)
-        // async barrier — CPU keeps building next chunk's graph while GPU
-        // evaluates this one.
-        var cacheArrays: [MLXArray] = []
-        for c in caches { cacheArrays.append(contentsOf: c.innerState()) }
-        asyncEval(cacheArrays)
-        pos = chunkEnd
+    var firstSampledOpt: MLXArray?
+    let _stage_prefill_start = Date()
+    var _chunkIdx = 0
+    // Wrap prefill in a dedicated stream context — mirrors mlx-lm's
+    // `with mx.stream(generation_stream)` at generate.py:401,426. Default
+    // stream serializes with framework ops; named stream is isolated.
+    firstSampledOpt = MLX.Stream.withStream(engine.decodeStream) {
+        var sampled: MLXArray?
+        while pos < prefillEnd {
+            let chunkEnd = min(pos + prefillStepSize, prefillEnd)
+            let chunk = inputBatch[0..., pos..<chunkEnd]
+            let _ch_t0 = Date()
+            // Pre-chunk memory + position log. Flushed immediately so we see
+            // the LAST chunk before a crash, even if Swift print buffers.
+            let _active = MLX.Memory.activeMemory / 1024 / 1024
+            let _cache = MLX.Memory.cacheMemory / 1024 / 1024
+            let _peak = MLX.Memory.peakMemory / 1024 / 1024
+            print("[vsm-timing] chunk[\(_chunkIdx)] BEGIN pos=\(pos) end=\(chunkEnd) T=\(chunkEnd-pos) | active=\(_active)MB cache=\(_cache)MB peak=\(_peak)MB")
+            fflush(stdout)
+            let _ch_forward_t0 = Date()
+            let out = lmModel(LMInput.Text(tokens: chunk), cache: caches, state: nil)
+            let _ch_forward_ms = Int(Date().timeIntervalSince(_ch_forward_t0) * 1_000_000)
+            var toEval: [MLXArray] = []
+            for c in caches { toEval.append(contentsOf: c.innerState()) }
+            let _ch_eval_t0 = Date()
+            if chunkEnd == prefillEnd {
+                let lastLogits = out.logits[0..., -1, 0...]
+                let s = argMax(lastLogits, axis: -1)
+                toEval.append(s)
+                eval(toEval)
+                sampled = s
+            } else {
+                eval(toEval)
+            }
+            let _ch_eval_ms = Int(Date().timeIntervalSince(_ch_eval_t0) * 1000)
+            let _ch_clear_t0 = Date()
+            MLX.Memory.clearCache()
+            let _ch_clear_ms = Int(Date().timeIntervalSince(_ch_clear_t0) * 1000)
+            let _ch_total_ms = Int(Date().timeIntervalSince(_ch_t0) * 1000)
+            let _active2 = MLX.Memory.activeMemory / 1024 / 1024
+            let _cache2 = MLX.Memory.cacheMemory / 1024 / 1024
+            let _peak2 = MLX.Memory.peakMemory / 1024 / 1024
+            print("[vsm-timing] chunk[\(_chunkIdx)] END total=\(_ch_total_ms)ms forward_build=\(_ch_forward_ms)µs eval=\(_ch_eval_ms)ms clear=\(_ch_clear_ms)ms | active=\(_active2)MB cache=\(_cache2)MB peak=\(_peak2)MB")
+            fflush(stdout)
+            _chunkIdx += 1
+            pos = chunkEnd
+        }
+        return sampled
     }
-    eval(caches)
-    MLX.Memory.clearCache()
+    guard let firstTokens = firstSampledOpt else {
+        print("[vsm] prefill_batched_uniform hybrid: missing first sampled token")
+        return -12
+    }
+    let _stage_prefill_ms = Int(Date().timeIntervalSince(_stage_prefill_start) * 1000)
+    print("[vsm-timing] chunked_prefill=\(_stage_prefill_ms)ms")
 
-    let lastPromptTokens = inputBatch[0..., (T - 1)..<T]  // [B, 1]
-    let firstStepOut = lmModel(
-        LMInput.Text(tokens: lastPromptTokens), cache: caches, state: nil)
-    let firstLogits = firstStepOut.logits[0..., -1, 0...]  // [B, V]
-    let firstSampled = argMax(firstLogits, axis: -1)       // [B]
-    eval(firstSampled)
-    let secondInput = firstSampled.reshaped(B, 1)
-    let secondStepOut = lmModel(
-        LMInput.Text(tokens: secondInput), cache: caches, state: nil)
-    let secondLogits = secondStepOut.logits[0..., -1, 0...]
-    let firstTokens = argMax(secondLogits, axis: -1)        // [B]
-    eval(firstTokens)
+    // B=1 BHC bypass — Path A from /tmp/iter1-bhc-bypass-research.md.
+    // When the prefill batch is a single request AND the engine isn't in
+    // F-85 sparse-hybrid mode AND the env var permits, skip the
+    // BatchedHybridCache alloc + per-layer slice-copy. Stash the prefill
+    // `[StandardKVCache, SSMStateCache, …]` directly on the engine; the
+    // decode hot path picks it up via `hybridDecodeCaches[rid]` and routes
+    // through `lmModel(_:cache:state:)` — same surface
+    // `TokenIterator.next()` exercises in mlx-swift-lm.
+    // Default OFF — Iter 6 bench (2026-05-20) showed BHC `fullyBatchedForward`
+    // beats the standard `callAsFunction` path at B=1 by 23-29% (123→95 tps
+    // T=4K). Code path kept for future experiments (Path B storage rebind, or
+    // porting the BHC kernel wins into the standard path).
+    let bypassEnabled = ProcessInfo.processInfo.environment["VSM_HYBRID_B1_BYPASS"] == "1"
+    let isSparseHybrid = engine.sparseEnabled
+        && (engine.model as? any BatchedHybridSparseLLM) != nil
+    if B == 1, bypassEnabled, !isSparseHybrid, let rid = rids.first {
+        let firstTokenInt = Int(firstTokens[0].item(Int32.self))
+        engine.batchedHybridCaches = nil
+        engine.batchedCaches = nil
+        engine.batchSlots.removeAll()
+        engine.batchTokens = [firstTokenInt]
+        engine.batchSlots[rid] = 0
+        engine.hybridDecodeCaches[rid] = caches
+        print("[vsm-timing] hybrid_b1_bypass=1 skipped_alloc_copy")
+        return 0
+    }
+
+    let _stage_alloc_start = Date()
 
     // Size the attention-layer BatchedKVCache to fit the actual prefill
     // length. Without this, `model.newBatchedHybridCache` falls back to its
@@ -3199,12 +3565,35 @@ private func prefillBatchedUniformHybrid(
     // layers' batched cache.
     let (turboKB, turboVB) = batchedTurboBits(from: engine.generateParams)
 
+    // If sparse requested AND model is BatchedHybridSparseLLM, build hybrid
+    // cache with `.sparseAttention(BatchedRetrievalAttentionKVCache)` for
+    // attention layers (GDN/Mamba layers stay dense). Mirrors the
+    // `init_batched_hybrid` path. Hybrid sparse models: Qwen35/Qwen35MoE
+    // (Qwen3.5 dense + Qwen3.6 MoE — share `Qwen35TextModel`) and NemotronH.
+    // Without this branch, `VSM_SPARSE=1` on hybrid models silently
+    // fell through to dense `newBatchedHybridCache` here, since the
+    // `.sparseAttention` case in the per-layer copy below was unreachable.
+    let sparseHybridModel: (any BatchedHybridSparseLLM)? = {
+        guard engine.sparseEnabled,
+              let s = engine.model as? any BatchedHybridSparseLLM
+        else { return nil }
+        return s
+    }()
+    let sparseModeStr = sparseHybridModel != nil ? "sparse" : "dense"
     print("[vsm] prefill_batched_uniform hybrid: T=\(T) B=\(B) maxBatch=\(maxBatch) "
-        + "maxSeq=\(maxSeq)")
+        + "maxSeq=\(maxSeq) mode=\(sparseModeStr)")
     memLog("prefill_batched_uniform_hybrid:before_alloc")
-    let hCaches = model.newBatchedHybridCache(
-        maxBatch: maxBatch, parameters: hybridParams,
-        turboKeyBits: turboKB, turboValueBits: turboVB)
+    let hCaches: BatchedHybridCache
+    if let sparseHybridModel {
+        let raCfg = RetrievalAttentionConfig()
+        hCaches = sparseHybridModel.newBatchedHybridSparseCache(
+            maxBatch: maxBatch, parameters: hybridParams,
+            raConfig: raCfg)
+    } else {
+        hCaches = model.newBatchedHybridCache(
+            maxBatch: maxBatch, parameters: hybridParams,
+            turboKeyBits: turboKB, turboValueBits: turboVB)
+    }
 
     guard numLayers == hCaches.layers.count else {
         print("[vsm] prefill_batched_uniform hybrid: layer count mismatch — req=\(numLayers) hybrid=\(hCaches.layers.count)")
@@ -3214,7 +3603,13 @@ private func prefillBatchedUniformHybrid(
     // Per-layer copy + eager release. Mirrors the Qwen3 path's
     // `transientCaches[layer] = nil` defense; doubled-state would otherwise
     // pin both prefill caches and BatchedHybridCache across all layers.
+    // Batch per-layer KV-cache copy evals into groups of 4: 62-layer
+    // model → 16 buffer commits instead of 62. Saves ~50-100ms of
+    // command-buffer overhead, stays under Metal's 5s per-buffer limit
+    // (which we hit when removing all inner evals).
     var transientCaches: [KVCache?] = caches.map { $0 }
+    let evalEvery = 4
+    var pendingEval: [MLXArray] = []
     for layerIdx in 0..<numLayers {
         let dstLayer = hCaches.layers[layerIdx]
         switch dstLayer {
@@ -3225,7 +3620,7 @@ private func prefillBatchedUniformHybrid(
                 print("[vsm] prefill_batched_uniform hybrid: layer \(layerIdx) expected StandardKVCache")
                 return -9
             }
-            eval(bkv.keys, bkv.values)
+            pendingEval.append(bkv.keys); pendingEval.append(bkv.values)
         case .gdn(let bma):
             guard let mamba = transientCaches[layerIdx] as? SSMStateCache,
                   copyBatchedMambaLayer(src: mamba, dst: bma, B: B)
@@ -3233,7 +3628,7 @@ private func prefillBatchedUniformHybrid(
                 print("[vsm] prefill_batched_uniform hybrid: layer \(layerIdx) expected SSMStateCache")
                 return -10
             }
-            eval(bma.convState, bma.recState)
+            pendingEval.append(bma.convState); pendingEval.append(bma.recState)
         case .sparseAttention(let raCache):
             guard let simple = transientCaches[layerIdx] as? StandardKVCache,
                   copyBatchedAttentionLayer(src: simple, dst: raCache.inner, B: B)
@@ -3241,9 +3636,13 @@ private func prefillBatchedUniformHybrid(
                 print("[vsm] prefill_batched_uniform hybrid: layer \(layerIdx) expected StandardKVCache (sparse)")
                 return -11
             }
-            eval(raCache.inner.keys, raCache.inner.values)
+            pendingEval.append(raCache.inner.keys); pendingEval.append(raCache.inner.values)
         }
         transientCaches[layerIdx] = nil
+        if (layerIdx + 1) % evalEvery == 0 || layerIdx == numLayers - 1 {
+            eval(pendingEval)
+            pendingEval.removeAll(keepingCapacity: true)
+        }
     }
 
     // Final eval across all layers before returning.
@@ -3259,6 +3658,8 @@ private func prefillBatchedUniformHybrid(
         }
     }
     eval(toEval)
+    let _stage_alloc_ms = Int(Date().timeIntervalSince(_stage_alloc_start) * 1000)
+    print("[vsm-timing] batched_cache_alloc+copy=\(_stage_alloc_ms)ms")
 
     memLog("prefill_batched_uniform_hybrid:after_eval")
 

@@ -19,6 +19,9 @@ let package = Package(
         // For local dev: .package(path: "/Users/tom/dev/mlx-swift-lm")
         // .package(url: "https://github.com/TheTom/mlx-swift-lm.git", branch: "vllm-swift-stable"),
         .package(path: "/Users/tom/dev/mlx-swift-lm"),
+        // metaltile kernels (Rust DSL → MSL → kernels.metallib + Swift wrappers).
+        // Local path so we pick up new kernels as they're added to the registry.
+        .package(path: "/Users/tom/dev/MetalTileSwift"),
     ],
     targets: [
         .target(
@@ -27,6 +30,7 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXVLM", package: "mlx-swift-lm"),
+                .product(name: "MetalTileSwift", package: "MetalTileSwift"),
             ],
             path: "Sources/VLLMBridge",
             swiftSettings: [
