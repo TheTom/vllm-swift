@@ -10,7 +10,6 @@ import Foundation
 import MLX
 import MLXNN
 import MLXLMCommon
-import MetalTileSwift
 @_exported import MLXLLM
 import MLXVLM
 // HuggingFace macros require the full HF SDK. For now, load models
@@ -490,38 +489,11 @@ public func vsm_engine_create(
         print("[vsm] wired_limit: prev=\(previous/1024/1024)MB now=\(maxRec/1024/1024)MB")
     }
 
-    // Connectivity proof: load MetalTileSwift's pre-compiled kernels.metallib
-    // and report the kernel names available. Confirms vllm-swift can reach
-    // metaltile kernels through the Swift package.
-    let mtLib = MetalTileLibrary.shared
-    let funcNames = mtLib.library.functionNames
-    let mtKey = "VSM_USE_METALTILE"
-    let mtEnabled = (ProcessInfo.processInfo.environment[mtKey] ?? "0") != "0"
-    print("[vsm] MetalTileSwift loaded: \(funcNames.count) kernels, mtl=\(mtLib.metallibURL.lastPathComponent), VSM_USE_METALTILE=\(mtEnabled)")
-    if let qmmIdx = funcNames.firstIndex(where: { $0.contains("mt_qmm_mma") }) {
-        print("[vsm] metaltile mt_qmm_mma: \(funcNames[qmmIdx])")
-    }
-    if let moeIdx = funcNames.firstIndex(where: { $0.contains("mt_moe_gather_qmm") }) {
-        print("[vsm] metaltile mt_moe_gather: \(funcNames[moeIdx])")
-    }
-
-    // Smoke dispatch: prove mt_qmm_mma can execute end-to-end through
-    // vllm-swift's process context. Uses M=32 N=256 K=2048 shape (Qwen3.6
-    // attention qkv_proj per chunk).
-    do {
-        let xS = MLXArray.zeros([32, 2048], dtype: .float16)
-        let wQ = MLXArray.zeros([256, 256], dtype: .uint32) // [N, K/8]=[256, 256]
-        let sS = MLXArray.zeros([256, 32], dtype: .float16) // [N, K/gs]=[256, 32]
-        let bS = MLXArray.zeros([256, 32], dtype: .float16)
-        let t0 = Date()
-        if let y = MetalTileShim.qmmMma(x: xS, w: wQ, scales: sS, biases: bS) {
-            let ms = Int(Date().timeIntervalSince(t0) * 1000)
-            print("[vsm] metaltile smoke: mt_qmm_mma M=32 N=256 K=2048 fp16 → shape=\(y.shape) took=\(ms)ms")
-        } else {
-            print("[vsm] metaltile smoke FAILED — shim returned nil")
-        }
-    }
-
+    // MetalTileSwift dep removed — future path is vllm-swift → FFAI →
+    // metaltile, kernels flow through FFAI's MetalTileSwift target. The
+    // standalone /Users/tom/dev/MetalTileSwift dep + the MetalTileShim
+    // wrapper + this connectivity-proof + smoke-dispatch block were
+    // dropped together. Re-add once FFAI is wired in.
     print("[vsm] Engine created: \(modelId)")
     memLog("engine_create:done")
     return handle

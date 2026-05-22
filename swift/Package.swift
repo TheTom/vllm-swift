@@ -19,9 +19,11 @@ let package = Package(
         // For local dev: .package(path: "/Users/tom/dev/mlx-swift-lm")
         // .package(url: "https://github.com/TheTom/mlx-swift-lm.git", branch: "vllm-swift-stable"),
         .package(path: "/Users/tom/dev/mlx-swift-lm"),
-        // metaltile kernels (Rust DSL → MSL → kernels.metallib + Swift wrappers).
-        // Local path so we pick up new kernels as they're added to the registry.
-        .package(path: "/Users/tom/dev/MetalTileSwift"),
+        // metaltile path is moving to `vllm-swift → FFAI → metaltile`. The
+        // standalone `~/dev/MetalTileSwift` package dep is removed for the
+        // moment; once vllm-swift takes a dep on FFAI, kernels flow through
+        // FFAI's inner MetalTileSwift target. The shim wrapper that used
+        // this dep (`MetalTileShim.swift`) is gone alongside the dep.
     ],
     targets: [
         .target(
@@ -30,7 +32,6 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXVLM", package: "mlx-swift-lm"),
-                .product(name: "MetalTileSwift", package: "MetalTileSwift"),
             ],
             path: "Sources/VLLMBridge",
             swiftSettings: [
