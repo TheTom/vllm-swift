@@ -19,11 +19,11 @@ let package = Package(
         // For local dev: .package(path: "/Users/tom/dev/mlx-swift-lm")
         // .package(url: "https://github.com/TheTom/mlx-swift-lm.git", branch: "vllm-swift-stable"),
         .package(path: "/Users/tom/dev/mlx-swift-lm"),
-        // metaltile path is moving to `vllm-swift → FFAI → metaltile`. The
-        // standalone `~/dev/MetalTileSwift` package dep is removed for the
-        // moment; once vllm-swift takes a dep on FFAI, kernels flow through
-        // FFAI's inner MetalTileSwift target. The shim wrapper that used
-        // this dep (`MetalTileShim.swift`) is gone alongside the dep.
+        // `vllm-swift → FFAI → metaltile`: FFAI carries the GGUF DSv4-Flash
+        // engine (Swift) + the metaltile-generated Metal kernels (its inner
+        // MetalTileSwift target). Bridging to it is native Swift→Swift — the
+        // only C-ABI edge stays at the Python↔dylib boundary (`@_cdecl`).
+        .package(path: "/Users/tom/dev/FFAI"),
     ],
     targets: [
         .target(
@@ -32,6 +32,7 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXVLM", package: "mlx-swift-lm"),
+                .product(name: "FFAI", package: "FFAI"),
             ],
             path: "Sources/VLLMBridge",
             swiftSettings: [
