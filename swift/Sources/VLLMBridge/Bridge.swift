@@ -645,6 +645,14 @@ public func vsm_engine_prefill_req(
     guard let handle, let promptTokens, let reqId else { return -1 }
     let rid = String(cString: reqId)
 
+    // FFAI single-stream path (DSv4-GGUF). Only the `_default` request is
+    // supported (FFAI has no batched/multi-session KV yet).
+    if let ffai = ffaiEngineQueue.sync(execute: { ffaiEngines[handle] }) {
+        let tokens = (0..<Int(numTokens)).map { Int(promptTokens[$0]) }
+        ffai.reset()
+        return ffai.prefill(tokens: tokens)
+    }
+
     return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(-1) }
 
@@ -1012,6 +1020,11 @@ public func vsm_engine_decode_step_req(
 ) -> Int32 {
     guard let handle, let reqId else { return -1 }
     let rid = String(cString: reqId)
+
+    // FFAI single-stream decode (DSv4-GGUF).
+    if let ffai = ffaiEngineQueue.sync(execute: { ffaiEngines[handle] }) {
+        return ffai.decodeStep()
+    }
 
     return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(-1) }
@@ -3068,7 +3081,14 @@ public func vsm_engine_get_logits(
     _ handle: UnsafeMutableRawPointer?,
     outVocabSize: UnsafeMutablePointer<Int32>?
 ) -> UnsafePointer<Float>? {
-    // TODO: expose raw logits from last forward pass
+    // FFAI exposes the last forward's logits from its stable buffer (valid
+    // until the next prefill/decode step). MLX path is still TODO.
+    if let handle, let ffai = ffaiEngineQueue.sync(execute: { ffaiEngines[handle] }),
+        let base = ffai.logitsBuf.baseAddress {
+        outVocabSize?.pointee = Int32(ffai.vocabSize)
+        return UnsafePointer(base)
+    }
+    // TODO: expose raw logits from last forward pass (MLX)
     outVocabSize?.pointee = 0
     return nil
 }
@@ -3076,6 +3096,10 @@ public func vsm_engine_get_logits(
 @_cdecl("vsm_engine_reset")
 public func vsm_engine_reset(_ handle: UnsafeMutableRawPointer?) {
     guard let handle else { return }
+    if let ffai = ffaiEngineQueue.sync(execute: { ffaiEngines[handle] }) {
+        ffai.reset()
+        return
+    }
     engineQueue.sync {
         guard let engine = engines[handle] else { return }
         engine.sessions.removeAll()

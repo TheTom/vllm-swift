@@ -22,14 +22,48 @@ final class FFAIDsv4Engine: @unchecked Sendable {
     var state: DeepSeekV4Model.DecodeState
     let vocabSize: Int
     let numLayers: Int
+    /// Stable storage for the last forward's logits, so `vsm_engine_get_logits`
+    /// can hand Python a pointer that stays valid until the next step.
+    let logitsBuf: UnsafeMutableBufferPointer<Float>
 
     private init(model: DeepSeekV4Model, bundle: GGUFTensorBundle, vocab: Int, layers: Int) {
         self.model = model
         self.bundle = bundle
         self.vocabSize = vocab
         self.numLayers = layers
+        self.logitsBuf = UnsafeMutableBufferPointer<Float>.allocate(capacity: vocab)
+        self.logitsBuf.initialize(repeating: 0)
         model.keepLayersResident = true
         self.state = model.makeDecodeState()
+    }
+
+    deinit { logitsBuf.deallocate() }
+
+    /// Run one forward, copy logits into the stable buffer, return greedy argmax.
+    private func forwardAndArgmax(_ tokenId: Int) -> Int32 {
+        guard let logits = try? model.forwardAllLayers(inputTokenId: tokenId, state: state) else {
+            return -1
+        }
+        let host = logits.toFloatArray()
+        let n = min(host.count, vocabSize)
+        if n > 0 { host.withUnsafeBufferPointer { logitsBuf.baseAddress!.update(from: $0.baseAddress!, count: n) } }
+        var maxIdx = 0
+        var maxVal = -Float.infinity
+        for i in 0..<n where host[i] > maxVal { maxVal = host[i]; maxIdx = i }
+        return Int32(maxIdx)
+    }
+
+    /// Last sampled token — `decode_step` (which takes no token arg) feeds
+    /// this, mirroring the MLX session iterator's internal carry.
+    var lastToken: Int32 = -1
+
+    /// Prefill: feed the prompt sequentially (FFAI has no batched prefill);
+    /// the final token's forward yields the first sampled token.
+    func prefill(tokens: [Int]) -> Int32 {
+        guard !tokens.isEmpty else { return -1 }
+        for t in tokens.dropLast() { _ = forwardAndArgmax(t) }
+        lastToken = forwardAndArgmax(tokens.last!)
+        return lastToken
     }
 
     /// Returns an engine iff `modelPath` is a DeepSeek-V4 GGUF directory (or
@@ -67,15 +101,18 @@ final class FFAIDsv4Engine: @unchecked Sendable {
         }
     }
 
-    /// One decode step: feed `tokenId`, return the full logits vector.
-    func decodeStep(tokenId: Int) -> [Float] {
-        let logits = (try? model.forwardAllLayers(inputTokenId: tokenId, state: state))
-        return logits?.toFloatArray() ?? []
+    /// One decode step: feed the last sampled token, return greedy argmax
+    /// (logits also land in `logitsBuf` for `get_logits`).
+    func decodeStep() -> Int32 {
+        guard lastToken >= 0 else { return -1 }
+        lastToken = forwardAndArgmax(Int(lastToken))
+        return lastToken
     }
 
     /// Reset decode state for a fresh sequence.
     func reset() {
         state = model.makeDecodeState()
+        lastToken = -1
     }
 }
 
