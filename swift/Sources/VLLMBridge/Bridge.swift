@@ -323,6 +323,17 @@ public func vsm_engine_create(
     guard let modelPath else { return nil }
     let modelId = String(cString: modelPath)
 
+    // `vllm-swift → FFAI → metaltile`: if this is a DeepSeek-V4 GGUF, serve
+    // it through FFAI (Swift) instead of the MLX factory. Registered in a
+    // parallel handle map so the MLX path below is entirely unaffected.
+    if let ffai = FFAIDsv4Engine.tryLoad(modelPath: modelId) {
+        let ptr = Unmanaged.passRetained(ffai).toOpaque()
+        let handle = UnsafeMutableRawPointer(ptr)
+        ffaiEngineQueue.sync { ffaiEngines[handle] = ffai }
+        print("[vsm] Engine created (FFAI/GGUF): \(modelId)")
+        return handle
+    }
+
     // Set MLX_SDPA_BLOCKS=128 at engine-create time before MLX kernels
     // start compiling PSOs. Upstream MLX picks blocks=256 at our N range
     // on M-series GPUs, tuned for the no-mask SDPA kernel. Our sparse
@@ -503,6 +514,15 @@ public func vsm_engine_create(
 public func vsm_engine_destroy(_ handle: UnsafeMutableRawPointer?) {
     guard let handle else { return }
     memLog("engine_destroy:before")
+    // FFAI engine path.
+    var wasFFAI = false
+    ffaiEngineQueue.sync {
+        if ffaiEngines.removeValue(forKey: handle) != nil {
+            Unmanaged<FFAIDsv4Engine>.fromOpaque(handle).release()
+            wasFFAI = true
+        }
+    }
+    if wasFFAI { Memory.clearCache(); return }
     engineQueue.sync {
         if engines.removeValue(forKey: handle) != nil {
             Unmanaged<InferenceEngine>.fromOpaque(handle).release()
@@ -522,6 +542,9 @@ public func vsm_engine_destroy(_ handle: UnsafeMutableRawPointer?) {
 @_cdecl("vsm_engine_vocab_size")
 public func vsm_engine_vocab_size(_ handle: UnsafeMutableRawPointer?) -> Int32 {
     guard let handle else { return 0 }
+    if let ffai = ffaiEngineQueue.sync(execute: { ffaiEngines[handle] }) {
+        return Int32(ffai.vocabSize)
+    }
     return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
         // Flatten model parameters, find lm_head or embed_tokens
@@ -538,6 +561,9 @@ public func vsm_engine_vocab_size(_ handle: UnsafeMutableRawPointer?) -> Int32 {
 @_cdecl("vsm_engine_num_layers")
 public func vsm_engine_num_layers(_ handle: UnsafeMutableRawPointer?) -> Int32 {
     guard let handle else { return 0 }
+    if let ffai = ffaiEngineQueue.sync(execute: { ffaiEngines[handle] }) {
+        return Int32(ffai.numLayers)
+    }
     return engineQueue.sync { () -> Int32 in
         guard let engine = engines[handle] else { return Int32(0) }
         // Count layers from model parameters
