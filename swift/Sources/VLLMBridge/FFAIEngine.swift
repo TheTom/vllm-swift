@@ -39,11 +39,8 @@ final class FFAIDsv4Engine: @unchecked Sendable {
 
     deinit { logitsBuf.deallocate() }
 
-    /// Run one forward, copy logits into the stable buffer, return greedy argmax.
-    private func forwardAndArgmax(_ tokenId: Int) -> Int32 {
-        guard let logits = try? model.forwardAllLayers(inputTokenId: tokenId, state: state) else {
-            return -1
-        }
+    /// Copy logits into the stable buffer and return greedy argmax.
+    private func storeLogitsAndArgmax(_ logits: Tensor) -> Int32 {
         let host = logits.toFloatArray()
         let n = min(host.count, vocabSize)
         if n > 0 { host.withUnsafeBufferPointer { logitsBuf.baseAddress!.update(from: $0.baseAddress!, count: n) } }
@@ -53,14 +50,30 @@ final class FFAIDsv4Engine: @unchecked Sendable {
         return Int32(maxIdx)
     }
 
+    /// Run one decode forward, copy logits into the stable buffer, return greedy argmax.
+    private func forwardAndArgmax(_ tokenId: Int) -> Int32 {
+        guard let logits = try? model.forwardAllLayers(inputTokenId: tokenId, state: state) else {
+            return -1
+        }
+        state.position += 1
+        return storeLogitsAndArgmax(logits)
+    }
+
     /// Last sampled token — `decode_step` (which takes no token arg) feeds
     /// this, mirroring the MLX session iterator's internal carry.
     var lastToken: Int32 = -1
 
-    /// Prefill: feed the prompt sequentially (FFAI has no batched prefill);
-    /// the final token's forward yields the first sampled token.
+    /// Prefill: feed the prompt sequentially. FFAI has a batched DSv4 prefill
+    /// path in flight, but it is still experimental and currently diverges on
+    /// some short prompts, so keep serving the validated decode path by default.
     func prefill(tokens: [Int]) -> Int32 {
         guard !tokens.isEmpty else { return -1 }
+        if ProcessInfo.processInfo.environment["VSM_FFAI_EXPERIMENTAL_BATCHED_PREFILL"] == "1",
+           let logits = try? model.forwardPrefillChunk(tokens: tokens, state: state) {
+            lastToken = storeLogitsAndArgmax(logits)
+            return lastToken
+        }
+
         for t in tokens.dropLast() { _ = forwardAndArgmax(t) }
         lastToken = forwardAndArgmax(tokens.last!)
         return lastToken
